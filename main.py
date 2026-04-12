@@ -1,4 +1,3 @@
-
 import pygame
 import numpy as np
 import librosa
@@ -12,13 +11,18 @@ FPS = 60
 MAX_BARS = 128
 BAR_GAP = 3
 
-SPRING = 0.2     # responsiveness
-DAMPING = 0.8    # smoothness
+SPRING = 0.2
+DAMPING = 0.8
 
 COLOR_BG = (10, 10, 14)
 COLOR_TEXT = (230, 230, 230)
 COLOR_TEXT_DIM = (120, 120, 120)
 COLOR_ACCENT = (255, 60, 120)
+COLOR_CTRL = (50, 50, 60)
+COLOR_CTRL_HOVER = (80, 80, 95)
+
+SUPPORTED_FORMATS = {".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".webm", ".opus", ".mp4"}
+SKIP_SECONDS = 10
 
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
@@ -53,6 +57,44 @@ class VideoRenderer:
         self.writer.release()
         print("[RENDER] COMPLETE ✔")
 
+
+# ───────────────── BUTTON ─────────────────
+class Button:
+    def __init__(self, label, x, y, w, h, key_hint=""):
+        self.label = label
+        self.rect = pygame.Rect(x, y, w, h)
+        self.key_hint = key_hint
+        self.hovered = False
+
+    def update_pos(self, x, y):
+        self.rect.x = x
+        self.rect.y = y
+
+    def check_hover(self, mx, my):
+        self.hovered = self.rect.collidepoint(mx, my)
+
+    def draw(self, surface, font, font_hint):
+        color = COLOR_CTRL_HOVER if self.hovered else COLOR_CTRL
+        pygame.draw.rect(surface, color, self.rect, border_radius=8)
+        pygame.draw.rect(surface, (80, 80, 100), self.rect, 1, border_radius=8)
+
+        txt = font.render(self.label, True, COLOR_TEXT)
+        tx = self.rect.centerx - txt.get_width() // 2
+        ty = self.rect.centery - txt.get_height() // 2
+        surface.blit(txt, (tx, ty))
+
+        if self.key_hint:
+            hint = font_hint.render(self.key_hint, True, COLOR_TEXT_DIM)
+            surface.blit(hint, (self.rect.centerx - hint.get_width() // 2, self.rect.bottom + 4))
+
+    def is_clicked(self, event):
+        return (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self.rect.collidepoint(event.pos)
+        )
+
+
 # ───────────────── VISUALIZER ─────────────────
 class AudioVisualizer:
     def __init__(self):
@@ -67,6 +109,7 @@ class AudioVisualizer:
 
         self.font = pygame.font.SysFont("Segoe UI", 18)
         self.font_big = pygame.font.SysFont("Segoe UI", 36, bold=True)
+        self.font_hint = pygame.font.SysFont("Segoe UI", 13)
 
         self.file = None
         self.spec = None
@@ -85,25 +128,58 @@ class AudioVisualizer:
         self.renderer = None
         self.rendering = False
 
+        BW, BH = 115, 38
+        self.btn_prev = Button("◀◀  -10s", 0, 0, BW, BH, key_hint="← / A")
+        self.btn_play = Button("▶  Play",  0, 0, BW, BH, key_hint="Space")
+        self.btn_next = Button("▶▶  +10s", 0, 0, BW, BH, key_hint="→ / D")
+
+    # ───────── SEEK ─────────
+    def seek(self, t):
+        """Reliable cross-platform seek: stop → rewind → play from t."""
+        t = max(0.0, min(float(t), self.duration))
+        pygame.mixer.music.stop()
+        pygame.mixer.music.play(start=t)          # works on most backends
+        self.start_ticks = pygame.time.get_ticks() - int(t * 1000)
+        self.pause_time = t
+        self.current_time = t
+        if self.paused:
+            pygame.mixer.music.pause()
+
+    def skip(self, delta):
+        self.seek(self.current_time + delta)
+
+    # ───────── TOGGLE PAUSE ─────────
+    def toggle_pause(self):
+        if self.spec is None:
+            return
+        if not self.paused:
+            pygame.mixer.music.pause()
+            self.pause_time = self.current_time
+            self.paused = True
+            self.btn_play.label = "⏸  Pause"
+        else:
+            pygame.mixer.music.unpause()
+            self.start_ticks = pygame.time.get_ticks() - int(self.pause_time * 1000)
+            self.paused = False
+            self.btn_play.label = "▶  Play"
+
     # ───────── AUDIO LOAD ─────────
     def analyze(self, path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in SUPPORTED_FORMATS:
+            print(f"[SKIP] Unsupported format: {ext}")
+            print(f"       Supported: {', '.join(sorted(SUPPORTED_FORMATS))}")
+            return
+
         print(f"[LOAD] {os.path.basename(path)}")
 
         y, sr = librosa.load(path, sr=None, mono=True)
         self.duration = librosa.get_duration(y=y, sr=sr)
 
-        mel = librosa.feature.melspectrogram(
-            y=y,
-            sr=sr,
-            n_mels=MAX_BARS,
-            hop_length=512
-        )
-
+        mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=MAX_BARS, hop_length=512)
         self.spec = librosa.power_to_db(mel, ref=np.max)
         self.times = librosa.frames_to_time(
-            np.arange(self.spec.shape[1]),
-            sr=sr,
-            hop_length=512
+            np.arange(self.spec.shape[1]), sr=sr, hop_length=512
         )
 
         self.file = path
@@ -116,8 +192,9 @@ class AudioVisualizer:
         self.start_ticks = pygame.time.get_ticks()
         self.pause_time = 0.0
         self.paused = False
+        self.btn_play.label = "▶  Play"
 
-        print("[READY] SPACE=Pause | R=Render | ESC=Exit")
+        print("[READY]  Space=Pause  ←/→=±10s  R=Render  ESC=Exit")
 
     def spectrum_at(self, t):
         idx = np.searchsorted(self.times, t)
@@ -138,14 +215,15 @@ class AudioVisualizer:
                 self.rendering = False
                 return
         else:
-            t = self.pause_time if self.paused else (
-                (pygame.time.get_ticks() - self.start_ticks) / 1000
-            )
+            if self.paused:
+                t = self.pause_time
+            else:
+                t = (pygame.time.get_ticks() - self.start_ticks) / 1000.0
 
         self.current_time = min(max(t, 0.0), self.duration)
 
         data = self.spectrum_at(self.current_time)
-        max_h = self.screen.get_height() * 0.65
+        max_h = self.screen.get_height() * 0.60
 
         for i in range(self.active_bars):
             target = data[i] * max_h
@@ -157,61 +235,84 @@ class AudioVisualizer:
     def draw(self):
         self.screen.fill(COLOR_BG)
         w, h = self.screen.get_size()
+        mx, my = pygame.mouse.get_pos()
 
         if self.spec is None:
             txt = self.font_big.render("DROP AUDIO FILE", True, COLOR_TEXT)
-            self.screen.blit(txt, (w//2 - txt.get_width()//2, h//2))
+            self.screen.blit(txt, (w // 2 - txt.get_width() // 2, h // 2 - 30))
+            lines = [
+                "Supported: MP3 · WAV · OGG · FLAC · AAC · M4A · MP4 · WebM · Opus",
+                "Space = Play/Pause     ← / A = −10s     → / D = +10s     R = Render     ESC = Quit",
+            ]
+            for i, line in enumerate(lines):
+                s = self.font_hint.render(line, True, COLOR_TEXT_DIM)
+                self.screen.blit(s, (w // 2 - s.get_width() // 2, h // 2 + 20 + i * 22))
             pygame.display.flip()
             return
 
+        # ── Bars ──
         bar_area_w = w - 120
         bar_w = bar_area_w / self.active_bars
-        base_y = h * 0.75
+        base_y = h * 0.68
 
         for i in range(self.active_bars):
             bh = self.heights[i]
             if bh < 1:
                 continue
-
             hue = int((i / self.active_bars) * 360)
             color = pygame.Color(0)
             color.hsva = (hue, 80, 100, 100)
-
             pygame.draw.rect(
-                self.screen,
-                color,
-                (
-                    60 + i * bar_w,
-                    base_y - bh,
-                    bar_w - BAR_GAP,
-                    bh
-                )
+                self.screen, color,
+                (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh)
             )
 
-        # ───── Progress Bar ─────
-        bar_y = h - 40
-        bar_x = 120
-        bar_w2 = w - 240
-        bar_h = 5
+        # ── Progress bar ──
+        prog_y = h - 95
+        prog_x = 60
+        prog_w = w - 120
+        prog_h = 5
+        prog_rect = pygame.Rect(prog_x, prog_y - 6, prog_w, prog_h + 12)
 
-        pygame.draw.rect(
-            self.screen, (40, 40, 40),
-            (bar_x, bar_y, bar_w2, bar_h),
-            border_radius=3
-        )
+        pygame.draw.rect(self.screen, (40, 40, 40), (prog_x, prog_y, prog_w, prog_h), border_radius=3)
 
         progress = self.current_time / self.duration if self.duration > 0 else 0
-        fill = int(bar_w2 * progress)
+        fill = int(prog_w * progress)
+        if fill > 0:
+            pygame.draw.rect(self.screen, COLOR_ACCENT, (prog_x, prog_y, fill, prog_h), border_radius=3)
 
-        pygame.draw.rect(
-            self.screen, COLOR_ACCENT,
-            (bar_x, bar_y, fill, bar_h),
-            border_radius=3
+        # Highlight on hover
+        if prog_rect.collidepoint(mx, my):
+            pygame.draw.rect(self.screen, (255, 255, 255), (prog_x, prog_y, prog_w, prog_h), 1, border_radius=3)
+
+        # Timestamp
+        time_txt = (
+            f"{timedelta(seconds=int(self.current_time))} / "
+            f"{timedelta(seconds=int(self.duration))}"
         )
-
-        time_txt = f"{timedelta(seconds=int(self.current_time))} / {timedelta(seconds=int(self.duration))}"
         ts = self.font.render(time_txt, True, COLOR_TEXT_DIM)
-        self.screen.blit(ts, (w//2 - ts.get_width()//2, bar_y - 18))
+        self.screen.blit(ts, (w // 2 - ts.get_width() // 2, prog_y - 24))
+
+        # ── Control buttons ──
+        BW, BH = 115, 38
+        gap = 14
+        total_ctrl = 3 * BW + 2 * gap
+        bx = w // 2 - total_ctrl // 2
+        by = h - 60
+
+        self.btn_prev.update_pos(bx, by)
+        self.btn_play.update_pos(bx + BW + gap, by)
+        self.btn_next.update_pos(bx + 2 * (BW + gap), by)
+
+        for btn in (self.btn_prev, self.btn_play, self.btn_next):
+            btn.check_hover(mx, my)
+            btn.draw(self.screen, self.font, self.font_hint)
+
+        # ── Render overlay ──
+        if self.rendering:
+            pct = int(self.renderer.frame / max(self.renderer.total, 1) * 100)
+            ov = self.font.render(f"● RENDERING  {pct}%", True, COLOR_ACCENT)
+            self.screen.blit(ov, (w - ov.get_width() - 16, 12))
 
         pygame.display.flip()
 
@@ -220,35 +321,58 @@ class AudioVisualizer:
 
     # ───────── RUN ─────────
     def run(self):
-        print("MINIMAL VISUALIZER READY")
+        print("MINIMAL VISUALIZER READY — drop an audio/video file onto the window.")
 
         while self.running:
             for e in pygame.event.get():
+
+                # ── Quit ──
                 if e.type == pygame.QUIT:
                     self.running = False
 
+                # ── Drop file ──
                 elif e.type == pygame.DROPFILE and not self.rendering:
                     threading.Thread(target=self.analyze, args=(e.file,), daemon=True).start()
 
-                elif e.type == pygame.KEYDOWN:
+                # ── Keyboard  (checked independently — NOT elif) ──
+                if e.type == pygame.KEYDOWN:
                     if e.key == pygame.K_ESCAPE:
                         self.running = False
 
-                    elif e.key == pygame.K_SPACE and self.spec is not None:
-                        if not self.paused:
-                            pygame.mixer.music.pause()
-                            self.pause_time = self.current_time
-                            self.paused = True
-                        else:
-                            pygame.mixer.music.unpause()
-                            self.start_ticks = pygame.time.get_ticks() - int(self.pause_time * 1000)
-                            self.paused = False
+                    elif e.key == pygame.K_SPACE:
+                        self.toggle_pause()
+
+                    elif e.key in (pygame.K_LEFT, pygame.K_a) and self.spec is not None:
+                        self.skip(-SKIP_SECONDS)
+
+                    elif e.key in (pygame.K_RIGHT, pygame.K_d) and self.spec is not None:
+                        self.skip(SKIP_SECONDS)
 
                     elif e.key == pygame.K_r and self.spec is not None and not self.rendering:
                         out = os.path.splitext(self.file)[0] + "_viz.mp4"
                         self.renderer = VideoRenderer(1920, 1080, FPS)
                         self.renderer.start(out, self.duration)
                         self.rendering = True
+
+                # ── Mouse clicks (also independent) ──
+                if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                    w, h = self.screen.get_size()
+                    prog_x, prog_y = 60, h - 95
+                    prog_w = w - 120
+
+                    # Progress bar seek
+                    if self.spec is not None and pygame.Rect(prog_x, prog_y - 6, prog_w, 17).collidepoint(e.pos):
+                        ratio = (e.pos[0] - prog_x) / prog_w
+                        self.seek(ratio * self.duration)
+
+                    # Buttons
+                    elif self.spec is not None:
+                        if self.btn_prev.is_clicked(e):
+                            self.skip(-SKIP_SECONDS)
+                        elif self.btn_play.is_clicked(e):
+                            self.toggle_pause()
+                        elif self.btn_next.is_clicked(e):
+                            self.skip(SKIP_SECONDS)
 
             self.update()
             self.draw()
@@ -260,4 +384,3 @@ class AudioVisualizer:
 
 if __name__ == "__main__":
     AudioVisualizer().run()
-
