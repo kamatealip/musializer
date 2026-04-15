@@ -2,8 +2,10 @@ import pygame
 import numpy as np
 import librosa
 import os
+import sys
 import threading
 import cv2
+import colorsys
 from datetime import timedelta
 
 # ───────────────── CONFIG ─────────────────
@@ -23,6 +25,36 @@ COLOR_CTRL_HOVER = (80, 80, 95)
 
 SUPPORTED_FORMATS = {".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".webm", ".opus", ".mp4"}
 SKIP_SECONDS = 10
+
+BAR_GRAD = [
+    (0.78, 1.0, 0.95),
+    (0.62, 1.0, 1.00),
+    (0.50, 1.0, 1.00),
+    (0.38, 1.0, 1.00),
+    (0.10, 1.0, 1.00),
+    (0.96, 1.0, 0.95),
+]
+
+def hsv(h, s=1.0, v=1.0):
+    r, g, b = colorsys.hsv_to_rgb(h % 1.0, s, v)
+    return int(r * 255), int(g * 255), int(b * 255)
+
+
+def lerp(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return a + (b - a) * t
+
+
+def bar_color(i, n, hue_shift=0.0):
+    t = i / max(n - 1, 1)
+    idx = t * (len(BAR_GRAD) - 1)
+    lo = BAR_GRAD[int(idx)]
+    hi = BAR_GRAD[min(int(idx) + 1, len(BAR_GRAD) - 1)]
+    frac = idx - int(idx)
+    h = lerp(lo[0], hi[0], frac) + hue_shift
+    s = lerp(lo[1], hi[1], frac)
+    v = lerp(lo[2], hi[2], frac)
+    return hsv(h, s, v)
 
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
@@ -97,7 +129,7 @@ class Button:
 
 # ───────────────── VISUALIZER ─────────────────
 class AudioVisualizer:
-    def __init__(self):
+    def __init__(self, start_path=None):
         pygame.init()
         pygame.mixer.init(44100, -16, 2, 512)
 
@@ -132,6 +164,19 @@ class AudioVisualizer:
         self.btn_prev = Button("◀◀  -10s", 0, 0, BW, BH, key_hint="← / A")
         self.btn_play = Button("▶  Play",  0, 0, BW, BH, key_hint="Space")
         self.btn_next = Button("▶▶  +10s", 0, 0, BW, BH, key_hint="→ / D")
+
+        self.playlist_dir = None
+        self.playlist = []
+        self.playlist_index = 0
+        self.playlist_cursor = 0
+        self.playlist_scroll = 0
+        self.show_playlist = False
+
+        if start_path:
+            if os.path.isdir(start_path):
+                self.load_playlist(start_path)
+            elif os.path.isfile(start_path):
+                self.load_playlist(os.path.dirname(start_path), start_file=start_path)
 
     # ───────── SEEK ─────────
     def seek(self, t):
@@ -194,7 +239,59 @@ class AudioVisualizer:
         self.paused = False
         self.btn_play.label = "▶  Play"
 
-        print("[READY]  Space=Pause  ←/→=±10s  R=Render  ESC=Exit")
+        print("[READY]  Space=Pause  ←/→=±10s  R=Render  L=Playlist  ESC=Exit")
+
+    def get_supported_files(self, directory):
+        files = []
+        try:
+            for name in sorted(os.listdir(directory)):
+                path = os.path.join(directory, name)
+                if os.path.isfile(path) and os.path.splitext(name)[1].lower() in SUPPORTED_FORMATS:
+                    files.append(path)
+        except OSError:
+            pass
+        return files
+
+    def load_playlist(self, directory, start_file=None):
+        self.playlist_dir = directory
+        self.playlist = self.get_supported_files(directory)
+        self.playlist_index = 0
+        self.playlist_cursor = 0
+        self.playlist_scroll = 0
+
+        if start_file and start_file in self.playlist:
+            self.playlist_index = self.playlist.index(start_file)
+            self.playlist_cursor = self.playlist_index
+        elif not self.playlist:
+            print(f"[PLAYLIST] No supported tracks found in {directory}")
+
+        if self.playlist:
+            self.analyze(self.playlist[self.playlist_index])
+
+    def toggle_playlist(self):
+        if not self.playlist:
+            return
+        self.show_playlist = not self.show_playlist
+        if self.show_playlist:
+            self.playlist_cursor = self.playlist_index
+            self.playlist_scroll = max(0, self.playlist_cursor - 5)
+
+    def move_playlist_cursor(self, delta):
+        if not self.playlist:
+            return
+        self.playlist_cursor = (self.playlist_cursor + delta) % len(self.playlist)
+        visible = 10
+        if self.playlist_cursor < self.playlist_scroll:
+            self.playlist_scroll = self.playlist_cursor
+        elif self.playlist_cursor >= self.playlist_scroll + visible:
+            self.playlist_scroll = self.playlist_cursor - visible + 1
+
+    def select_playlist_item(self):
+        if not self.playlist:
+            return
+        self.playlist_index = self.playlist_cursor
+        self.show_playlist = False
+        self.analyze(self.playlist[self.playlist_index])
 
     def spectrum_at(self, t):
         idx = np.searchsorted(self.times, t)
@@ -255,16 +352,16 @@ class AudioVisualizer:
         bar_w = bar_area_w / self.active_bars
         base_y = h * 0.68
 
+        hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
         for i in range(self.active_bars):
             bh = self.heights[i]
             if bh < 1:
                 continue
-            hue = int((i / self.active_bars) * 360)
-            color = pygame.Color(0)
-            color.hsva = (hue, 80, 100, 100)
+            color = bar_color(i, self.active_bars, hue_shift)
             pygame.draw.rect(
                 self.screen, color,
-                (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh)
+                (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh),
+                border_radius=8
             )
 
         # ── Progress bar ──
@@ -314,6 +411,30 @@ class AudioVisualizer:
             ov = self.font.render(f"● RENDERING  {pct}%", True, COLOR_ACCENT)
             self.screen.blit(ov, (w - ov.get_width() - 16, 12))
 
+        if self.show_playlist:
+            overlay_w = w - 120
+            overlay_h = min(h - 120, 520)
+            overlay = pygame.Surface((overlay_w, overlay_h), pygame.SRCALPHA)
+            overlay.fill((10, 12, 18, 220))
+            pygame.draw.rect(overlay, (40, 42, 52), (0, 0, overlay_w, overlay_h), border_radius=14)
+
+            title = self.font_big.render("Playlist", True, COLOR_TEXT)
+            overlay.blit(title, (24, 18))
+            help_text = self.font_hint.render(
+                "L / Esc = Close   ↑ / ↓ = Navigate   Enter = Play", True, COLOR_TEXT_DIM
+            )
+            overlay.blit(help_text, (24, 64))
+
+            visible_lines = 10
+            for idx in range(self.playlist_scroll, min(len(self.playlist), self.playlist_scroll + visible_lines)):
+                name = os.path.basename(self.playlist[idx])
+                prefix = "▶ " if idx == self.playlist_index else "   "
+                color = COLOR_ACCENT if idx == self.playlist_cursor else COLOR_TEXT
+                item = self.font.render(f"{prefix}{idx + 1:02d}. {name}", True, color)
+                overlay.blit(item, (24, 104 + (idx - self.playlist_scroll) * 32))
+
+            self.screen.blit(overlay, (60, 40))
+
         pygame.display.flip()
 
         if self.rendering:
@@ -321,7 +442,7 @@ class AudioVisualizer:
 
     # ───────── RUN ─────────
     def run(self):
-        print("MINIMAL VISUALIZER READY — drop an audio/video file onto the window.")
+        print("MINIMAL VISUALIZER READY — drop an audio/video file onto the window. Press L to open the playlist.")
 
         while self.running:
             for e in pygame.event.get():
@@ -336,23 +457,35 @@ class AudioVisualizer:
 
                 # ── Keyboard  (checked independently — NOT elif) ──
                 if e.type == pygame.KEYDOWN:
-                    if e.key == pygame.K_ESCAPE:
-                        self.running = False
+                    if e.key == pygame.K_l and self.playlist:
+                        self.toggle_playlist()
+                    elif self.show_playlist:
+                        if e.key in (pygame.K_ESCAPE, pygame.K_l):
+                            self.show_playlist = False
+                        elif e.key == pygame.K_UP:
+                            self.move_playlist_cursor(-1)
+                        elif e.key == pygame.K_DOWN:
+                            self.move_playlist_cursor(1)
+                        elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            self.select_playlist_item()
+                    else:
+                        if e.key == pygame.K_ESCAPE:
+                            self.running = False
 
-                    elif e.key == pygame.K_SPACE:
-                        self.toggle_pause()
+                        elif e.key == pygame.K_SPACE:
+                            self.toggle_pause()
 
-                    elif e.key in (pygame.K_LEFT, pygame.K_a) and self.spec is not None:
-                        self.skip(-SKIP_SECONDS)
+                        elif e.key in (pygame.K_LEFT, pygame.K_a) and self.spec is not None:
+                            self.skip(-SKIP_SECONDS)
 
-                    elif e.key in (pygame.K_RIGHT, pygame.K_d) and self.spec is not None:
-                        self.skip(SKIP_SECONDS)
+                        elif e.key in (pygame.K_RIGHT, pygame.K_d) and self.spec is not None:
+                            self.skip(SKIP_SECONDS)
 
-                    elif e.key == pygame.K_r and self.spec is not None and not self.rendering:
-                        out = os.path.splitext(self.file)[0] + "_viz.mp4"
-                        self.renderer = VideoRenderer(1920, 1080, FPS)
-                        self.renderer.start(out, self.duration)
-                        self.rendering = True
+                        elif e.key == pygame.K_r and self.spec is not None and not self.rendering:
+                            out = os.path.splitext(self.file)[0] + "_viz.mp4"
+                            self.renderer = VideoRenderer(1920, 1080, FPS)
+                            self.renderer.start(out, self.duration)
+                            self.rendering = True
 
                 # ── Mouse clicks (also independent) ──
                 if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
@@ -383,4 +516,5 @@ class AudioVisualizer:
 
 
 if __name__ == "__main__":
-    AudioVisualizer().run()
+    start_path = sys.argv[1] if len(sys.argv) > 1 else None
+    AudioVisualizer(start_path).run()
