@@ -197,6 +197,7 @@ class AudioVisualizer:
         self.renderer = None
         self.rendering = False
         self.last_render_log = 0
+        self.render_progress_length = 0
 
         BW, BH = 115, 38
         self.btn_prev = Button("◀◀  -10s", 0, 0, BW, BH, key_hint="← / A")
@@ -332,6 +333,13 @@ class AudioVisualizer:
         self.show_playlist = False
         self.analyze(self.playlist[self.playlist_index])
 
+    def start_next_track(self):
+        if not self.playlist:
+            return
+        self.playlist_index = (self.playlist_index + 1) % len(self.playlist)
+        self.playlist_cursor = self.playlist_index
+        self.analyze(self.playlist[self.playlist_index])
+
     def spectrum_at(self, t):
         idx = np.searchsorted(self.times, t)
         idx = min(idx, len(self.times) - 1)
@@ -349,9 +357,13 @@ class AudioVisualizer:
                 pygame.mixer.music.unpause()
                 self.paused = False
             t = (pygame.time.get_ticks() - self.start_ticks) / 1000.0
-            if t >= self.duration or self.renderer.frame >= self.renderer.total:
+            track_ended = not pygame.mixer.music.get_busy() and t >= self.duration - 0.1
+            if track_ended or t >= self.duration or self.renderer.frame >= self.renderer.total:
                 self.renderer.stop()
                 self.rendering = False
+                self.render_progress_length = 0
+                if track_ended:
+                    self.start_next_track()
                 return
         else:
             if self.paused:
@@ -370,7 +382,11 @@ class AudioVisualizer:
                 bar_len = 30
                 filled = int(bar_len * pct / 100)
                 bar = "#" * filled + "-" * (bar_len - filled)
-                print(f"\r[RENDER] [{bar}] {pct}% complete — {rem_text} remaining", end="", flush=True)
+                msg = f"[RENDER] [{bar}] {pct}% complete — {rem_text} remaining"
+                clear = " " * max(0, self.render_progress_length - len(msg))
+                sys.stdout.write("\r" + msg + clear)
+                sys.stdout.flush()
+                self.render_progress_length = len(msg)
                 self.last_render_log = now_ms
 
         data = self.spectrum_at(self.current_time)

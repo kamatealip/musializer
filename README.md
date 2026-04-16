@@ -1,95 +1,76 @@
-# UV Python Project - Local Setup Guide
+# Musializer
 
-This repository uses **uv**, a fast and modern Python package manager, to manage dependencies and run the project locally. This guide takes you from **cloning the repository** to **running the project on your machine** with zero guesswork.
+A local Python music visualizer that renders animated frequency bars from audio files.
 
 ## Prerequisites
 
-Ensure the following are installed:
-
-- **Python 3.9+**
-- **Git**
+- Python 3.9+
+- `uv` package manager
+- `ffmpeg` for audio muxing into rendered MP4 files (optional, but recommended)
 
 Verify:
+
 ```bash
 python --version
-git --version
-```
-
-## About UV
-
-`uv` is a next-generation Python package manager that:
-
-* Replaces `pip`, `pip-tools`, and `virtualenv`
-* Automatically manages virtual environments
-* Uses `pyproject.toml` as the single source of truth
-* Is extremely fast (Rust-based)
-* You do not need to create or activate a virtual environment manually
-
-## Install UV
-
-### Linux / macOS
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Windows (PowerShell)
-```powershell
-irm https://astral.sh/uv/install.ps1 | iex
-```
-
-Verify installation:
-```bash
 uv --version
+ffmpeg -version
 ```
 
-## Clone the Repository
+## Install Dependencies
+
+From the repository root:
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo-name>.git
-cd <your-repo-name>
+uv sync
 ```
+
+This installs the dependencies defined in `pyproject.toml`.
 
 ## Project Structure
 
 ```
 .
+├── main.py
+├── music_visualizer.py
 ├── pyproject.toml
 ├── uv.lock
-├── src/
-│   └── main.py
-├── .env.example
-└── README.md
+├── README.md
+└── music/
 ```
 
-## Install Dependencies
+## Run the Visualizer
 
-From the project root:
+From the repository root:
+
 ```bash
-uv sync
+uv run python main.py
 ```
 
-This will:
+You can also pass a music folder manually:
 
-- Create a virtual environment automatically
-- Install all dependencies
-- Use `uv.lock` for reproducible builds
-
-## Environment Variables (Optional)
-
-If environment variables are required, copy `.env.example` to `.env` and update the values as needed.
-
-## Run the Project
-
-From the project root:
 ```bash
-uv run python src/main.py
+uv run python main.py ~/Music
 ```
 
-**OR**
-```bash
-uv run main.py
-```
+If no folder is provided, the script uses the local `music/` folder.
 
-This will run the `main.py` script in the `src` directory.
+## Controls
 
-and the window will pop where you can drag drip the music files and see the music visualization 
+- `SPACE` — Play / Pause
+- `←` / `A` — Seek backward 10 seconds
+- `→` / `D` — Seek forward 10 seconds
+- `L` — Open playlist
+- `R` — Start render mode
+- `ESC` — Exit
+
+## Render Output
+
+Press `R` while a track is loaded to generate `*_viz.mp4` in the same folder as the music file.
+
+If `ffmpeg` is available, the renderer will automatically mux the original audio into the output video.
+
+## Tips
+
+- Drop audio files onto the window to load them directly
+- Use the playlist view to select another track
+- The rendered video file is saved next to the source audio with `_viz.mp4` appended
