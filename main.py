@@ -11,10 +11,10 @@ from datetime import timedelta
 # ───────────────── CONFIG ─────────────────
 FPS = 60
 MAX_BARS = 128
-BAR_GAP = 3
+BAR_GAP = 1
 
-SPRING = 0.2
-DAMPING = 0.8
+SPRING = 0.22
+DAMPING = 0.92
 
 COLOR_BG = (10, 10, 14)
 COLOR_TEXT = (230, 230, 230)
@@ -55,6 +55,11 @@ def bar_color(i, n, hue_shift=0.0):
     s = lerp(lo[1], hi[1], frac)
     v = lerp(lo[2], hi[2], frac)
     return hsv(h, s, v)
+
+
+def ease_out_cubic(t):
+    t = max(0.0, min(1.0, t))
+    return 1.0 - (1.0 - t) ** 3
 
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
@@ -324,9 +329,14 @@ class AudioVisualizer:
 
         for i in range(self.active_bars):
             target = data[i] * max_h
-            force = (target - self.heights[i]) * SPRING
-            self.velocity[i] = (self.velocity[i] + force) * DAMPING
-            self.heights[i] += self.velocity[i]
+            diff = target - self.heights[i]
+            if abs(diff) < 1.0:
+                self.heights[i] = target
+                self.velocity[i] = 0.0
+                continue
+            rise_factor = SPRING * (1.35 if diff > 0 else 0.80)
+            self.velocity[i] = (self.velocity[i] + diff * rise_factor) * DAMPING
+            self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
 
     # ───────── DRAW ─────────
     def draw(self):
@@ -350,7 +360,10 @@ class AudioVisualizer:
         # ── Bars ──
         bar_area_w = w - 120
         bar_w = bar_area_w / self.active_bars
-        base_y = h * 0.68
+
+        prog_y = h - 95
+        base_y = prog_y - 20
+        max_h = self.screen.get_height() * 0.60
 
         hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
         for i in range(self.active_bars):
@@ -360,8 +373,7 @@ class AudioVisualizer:
             color = bar_color(i, self.active_bars, hue_shift)
             pygame.draw.rect(
                 self.screen, color,
-                (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh),
-                border_radius=8
+                (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh)
             )
 
         # ── Progress bar ──
