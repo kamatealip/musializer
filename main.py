@@ -13,8 +13,8 @@ FPS = 60
 MAX_BARS = 128
 BAR_GAP = 1
 
-SPRING = 0.22
-DAMPING = 0.92
+SPRING = 0.16
+DAMPING = 0.95
 
 COLOR_BG = (10, 10, 14)
 COLOR_TEXT = (230, 230, 230)
@@ -333,11 +333,7 @@ class AudioVisualizer:
         for i in range(self.active_bars):
             target = data[i] * max_h
             diff = target - self.heights[i]
-            if abs(diff) < 1.0:
-                self.heights[i] = target
-                self.velocity[i] = 0.0
-                continue
-            rise_factor = SPRING * (1.35 if diff > 0 else 0.80)
+            rise_factor = SPRING * (1.10 if diff > 0 else 0.85)
             self.velocity[i] = (self.velocity[i] + diff * rise_factor) * DAMPING
             self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
 
