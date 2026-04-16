@@ -12,7 +12,4 @@ assets/musics/*.wav
 assets/musics/*.mp4
 assets/musics/*.webm
 
-# ai stuff 
-.codex
 
-music_visualizer.py
