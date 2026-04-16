@@ -311,8 +311,11 @@ class AudioVisualizer:
             return
 
         if self.rendering:
-            t = self.renderer.frame / FPS
-            if t >= self.duration:
+            if self.paused:
+                pygame.mixer.music.unpause()
+                self.paused = False
+            t = (pygame.time.get_ticks() - self.start_ticks) / 1000.0
+            if t >= self.duration or self.renderer.frame >= self.renderer.total:
                 self.renderer.stop()
                 self.rendering = False
                 return
@@ -361,11 +364,15 @@ class AudioVisualizer:
         bar_area_w = w - 120
         bar_w = bar_area_w / self.active_bars
 
-        prog_y = h - 95
-        base_y = prog_y - 20
-        max_h = self.screen.get_height() * 0.60
+        if self.rendering:
+            base_y = h - 40
+            hue_shift = 0.0
+        else:
+            prog_y = h - 95
+            base_y = prog_y - 20
+            hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
 
-        hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
+        max_h = self.screen.get_height() * 0.60
         for i in range(self.active_bars):
             bh = self.heights[i]
             if bh < 1:
@@ -376,54 +383,49 @@ class AudioVisualizer:
                 (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh)
             )
 
-        # ── Progress bar ──
-        prog_y = h - 95
-        prog_x = 60
-        prog_w = w - 120
-        prog_h = 5
-        prog_rect = pygame.Rect(prog_x, prog_y - 6, prog_w, prog_h + 12)
+        if not self.rendering:
+            # ── Progress bar ──
+            prog_y = h - 95
+            prog_x = 60
+            prog_w = w - 120
+            prog_h = 5
+            prog_rect = pygame.Rect(prog_x, prog_y - 6, prog_w, prog_h + 12)
 
-        pygame.draw.rect(self.screen, (40, 40, 40), (prog_x, prog_y, prog_w, prog_h), border_radius=3)
+            pygame.draw.rect(self.screen, (40, 40, 40), (prog_x, prog_y, prog_w, prog_h), border_radius=3)
 
-        progress = self.current_time / self.duration if self.duration > 0 else 0
-        fill = int(prog_w * progress)
-        if fill > 0:
-            pygame.draw.rect(self.screen, COLOR_ACCENT, (prog_x, prog_y, fill, prog_h), border_radius=3)
+            progress = self.current_time / self.duration if self.duration > 0 else 0
+            fill = int(prog_w * progress)
+            if fill > 0:
+                pygame.draw.rect(self.screen, COLOR_ACCENT, (prog_x, prog_y, fill, prog_h), border_radius=3)
 
-        # Highlight on hover
-        if prog_rect.collidepoint(mx, my):
-            pygame.draw.rect(self.screen, (255, 255, 255), (prog_x, prog_y, prog_w, prog_h), 1, border_radius=3)
+            # Highlight on hover
+            if prog_rect.collidepoint(mx, my):
+                pygame.draw.rect(self.screen, (255, 255, 255), (prog_x, prog_y, prog_w, prog_h), 1, border_radius=3)
 
-        # Timestamp
-        time_txt = (
-            f"{timedelta(seconds=int(self.current_time))} / "
-            f"{timedelta(seconds=int(self.duration))}"
-        )
-        ts = self.font.render(time_txt, True, COLOR_TEXT_DIM)
-        self.screen.blit(ts, (w // 2 - ts.get_width() // 2, prog_y - 24))
+            # Timestamp
+            time_txt = (
+                f"{timedelta(seconds=int(self.current_time))} / "
+                f"{timedelta(seconds=int(self.duration))}"
+            )
+            ts = self.font.render(time_txt, True, COLOR_TEXT_DIM)
+            self.screen.blit(ts, (w // 2 - ts.get_width() // 2, prog_y - 24))
 
-        # ── Control buttons ──
-        BW, BH = 115, 38
-        gap = 14
-        total_ctrl = 3 * BW + 2 * gap
-        bx = w // 2 - total_ctrl // 2
-        by = h - 60
+            # ── Control buttons ──
+            BW, BH = 115, 38
+            gap = 14
+            total_ctrl = 3 * BW + 2 * gap
+            bx = w // 2 - total_ctrl // 2
+            by = h - 60
 
-        self.btn_prev.update_pos(bx, by)
-        self.btn_play.update_pos(bx + BW + gap, by)
-        self.btn_next.update_pos(bx + 2 * (BW + gap), by)
+            self.btn_prev.update_pos(bx, by)
+            self.btn_play.update_pos(bx + BW + gap, by)
+            self.btn_next.update_pos(bx + 2 * (BW + gap), by)
 
-        for btn in (self.btn_prev, self.btn_play, self.btn_next):
-            btn.check_hover(mx, my)
-            btn.draw(self.screen, self.font, self.font_hint)
+            for btn in (self.btn_prev, self.btn_play, self.btn_next):
+                btn.check_hover(mx, my)
+                btn.draw(self.screen, self.font, self.font_hint)
 
-        # ── Render overlay ──
-        if self.rendering:
-            pct = int(self.renderer.frame / max(self.renderer.total, 1) * 100)
-            ov = self.font.render(f"● RENDERING  {pct}%", True, COLOR_ACCENT)
-            self.screen.blit(ov, (w - ov.get_width() - 16, 12))
-
-        if self.show_playlist:
+        if self.show_playlist and not self.rendering:
             overlay_w = w - 120
             overlay_h = min(h - 120, 520)
             overlay = pygame.Surface((overlay_w, overlay_h), pygame.SRCALPHA)
@@ -494,6 +496,12 @@ class AudioVisualizer:
                             self.skip(SKIP_SECONDS)
 
                         elif e.key == pygame.K_r and self.spec is not None and not self.rendering:
+                            if self.paused:
+                                pygame.mixer.music.unpause()
+                                self.paused = False
+                            if not pygame.mixer.music.get_busy():
+                                pygame.mixer.music.play(start=self.current_time)
+                                self.start_ticks = pygame.time.get_ticks() - int(self.current_time * 1000)
                             out = os.path.splitext(self.file)[0] + "_viz.mp4"
                             self.renderer = VideoRenderer(1920, 1080, FPS)
                             self.renderer.start(out, self.duration)
