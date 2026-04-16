@@ -11,3 +11,6 @@ wheels/
 assets/musics/*.wav
 assets/musics/*.mp4
 assets/musics/*.webm
+
+.codex
+music_visualizer.py
