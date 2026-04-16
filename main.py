@@ -7,6 +7,8 @@ import threading
 import cv2
 import colorsys
 import math
+import shutil
+import subprocess
 from datetime import timedelta
 
 # ───────────────── CONFIG ─────────────────
@@ -76,7 +78,9 @@ class VideoRenderer:
         self.total = 0
         self.writer = None
 
-    def start(self, path, duration):
+    def start(self, path, duration, audio_source=None):
+        self.path = path
+        self.audio_source = audio_source
         self.total = int(duration * self.fps)
         self.writer = cv2.VideoWriter(
             path,
@@ -97,7 +101,30 @@ class VideoRenderer:
 
     def stop(self):
         self.writer.release()
-        print("[RENDER] COMPLETE ✔")
+        if self.audio_source and shutil.which("ffmpeg"):
+            temp_path = self.path + ".tmp.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", self.path,
+                "-i", self.audio_source,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                temp_path,
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                os.replace(temp_path, self.path)
+                print(f"\n[RENDER] COMPLETE ✔ stored at: {self.path}")
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                print(f"\n[RENDER] COMPLETE ✔ stored at: {self.path}")
+                print(f"[RENDER] WARNING: audio mux failed: {e}")
+        else:
+            print(f"\n[RENDER] COMPLETE ✔ stored at: {self.path}")
 
 
 # ───────────────── BUTTON ─────────────────
@@ -336,11 +363,14 @@ class AudioVisualizer:
 
         if self.rendering:
             now_ms = pygame.time.get_ticks()
-            if now_ms - self.last_render_log >= 1000:
+            if now_ms - self.last_render_log >= 500:
                 remaining = max(0.0, self.duration - self.current_time)
                 pct = int((self.current_time / self.duration) * 100) if self.duration > 0 else 0
                 rem_text = str(timedelta(seconds=int(remaining)))
-                print(f"[RENDER] {pct}% complete — {rem_text} remaining")
+                bar_len = 30
+                filled = int(bar_len * pct / 100)
+                bar = "#" * filled + "-" * (bar_len - filled)
+                print(f"\r[RENDER] [{bar}] {pct}% complete — {rem_text} remaining", end="", flush=True)
                 self.last_render_log = now_ms
 
         data = self.spectrum_at(self.current_time)
@@ -520,7 +550,7 @@ class AudioVisualizer:
                                 self.start_ticks = pygame.time.get_ticks() - int(self.current_time * 1000)
                             out = os.path.splitext(self.file)[0] + "_viz.mp4"
                             self.renderer = VideoRenderer(1920, 1080, FPS)
-                            self.renderer.start(out, self.duration)
+                            self.renderer.start(out, self.duration, audio_source=self.file)
                             self.rendering = True
 
                 # ── Mouse clicks (also independent) ──
