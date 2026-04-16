@@ -6,6 +6,7 @@ import sys
 import threading
 import cv2
 import colorsys
+import math
 from datetime import timedelta
 
 # ───────────────── CONFIG ─────────────────
@@ -60,6 +61,10 @@ def bar_color(i, n, hue_shift=0.0):
 def ease_out_cubic(t):
     t = max(0.0, min(1.0, t))
     return 1.0 - (1.0 - t) ** 3
+
+def ease_in_out(t):
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
 
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
@@ -164,6 +169,7 @@ class AudioVisualizer:
 
         self.renderer = None
         self.rendering = False
+        self.last_render_log = 0
 
         BW, BH = 115, 38
         self.btn_prev = Button("◀◀  -10s", 0, 0, BW, BH, key_hint="← / A")
@@ -251,7 +257,8 @@ class AudioVisualizer:
         try:
             for name in sorted(os.listdir(directory)):
                 path = os.path.join(directory, name)
-                if os.path.isfile(path) and os.path.splitext(name)[1].lower() in SUPPORTED_FORMATS:
+                stem, ext = os.path.splitext(name)
+                if ext.lower() in SUPPORTED_FORMATS and not stem.lower().endswith("_viz"):
                     files.append(path)
         except OSError:
             pass
@@ -327,14 +334,27 @@ class AudioVisualizer:
 
         self.current_time = min(max(t, 0.0), self.duration)
 
+        if self.rendering:
+            now_ms = pygame.time.get_ticks()
+            if now_ms - self.last_render_log >= 1000:
+                remaining = max(0.0, self.duration - self.current_time)
+                pct = int((self.current_time / self.duration) * 100) if self.duration > 0 else 0
+                rem_text = str(timedelta(seconds=int(remaining)))
+                print(f"[RENDER] {pct}% complete — {rem_text} remaining")
+                self.last_render_log = now_ms
+
         data = self.spectrum_at(self.current_time)
         max_h = self.screen.get_height() * 0.60
 
         for i in range(self.active_bars):
             target = data[i] * max_h
             diff = target - self.heights[i]
-            rise_factor = SPRING * (1.10 if diff > 0 else 0.85)
-            self.velocity[i] = (self.velocity[i] + diff * rise_factor) * DAMPING
+            ratio = min(1.0, abs(diff) / max_h)
+            ease = ease_in_out(ratio)
+            spring_force = SPRING * (0.70 + 0.50 * ease)
+            self.velocity[i] = (self.velocity[i] + diff * spring_force) * DAMPING
+            if abs(self.velocity[i]) > abs(diff):
+                self.velocity[i] = math.copysign(abs(diff), self.velocity[i])
             self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
 
     # ───────── DRAW ─────────
