@@ -74,3 +74,7 @@ If `ffmpeg` is available, the renderer will automatically mux the original audio
 - Drop audio files onto the window to load them directly
 - Use the playlist view to select another track
 - The rendered video file is saved next to the source audio with `_viz.mp4` appended
+
+## next ti implement 
+- youtube search
+- multi threading 
