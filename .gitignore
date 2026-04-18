@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+renders/
 assets/musics/*.wav
 assets/musics/*.mp4
 assets/musics/*.webm

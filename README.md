@@ -1,12 +1,13 @@
 # Musializer
 
-A local Python music visualizer that renders animated frequency bars from audio files.
+A Python music visualizer that renders animated frequency bars from local files and online streams.
 
 ## Prerequisites
 
 - Python 3.9+
 - `uv` package manager
-- `ffmpeg` for audio muxing into rendered MP4 files (optional, but recommended)
+- `ffmpeg` for audio muxing and extracting online stream audio
+- `yt-dlp` for YouTube and other supported online streams
 
 Verify:
 
@@ -14,6 +15,7 @@ Verify:
 python --version
 uv --version
 ffmpeg -version
+yt-dlp --version
 ```
 
 ## Install Dependencies
@@ -31,7 +33,6 @@ This installs the dependencies defined in `pyproject.toml`.
 ```
 .
 ├── main.py
-├── music_visualizer.py
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
@@ -52,6 +53,13 @@ You can also pass a music folder manually:
 uv run python main.py ~/Music
 ```
 
+You can also start with a YouTube URL or search term:
+
+```bash
+uv run python main.py "https://youtu.be/example"
+uv run python main.py "daft punk harder better faster stronger"
+```
+
 If no folder is provided, the script uses the local `music/` folder.
 
 ## Controls
@@ -59,22 +67,29 @@ If no folder is provided, the script uses the local `music/` folder.
 - `SPACE` — Play / Pause
 - `←` / `A` — Seek backward 10 seconds
 - `→` / `D` — Seek forward 10 seconds
+- `U` — Open the online stream/search prompt
 - `L` — Open playlist
 - `R` — Start render mode
 - `ESC` — Exit
 
 ## Render Output
 
-Press `R` while a track is loaded to generate `*_viz.mp4` in the same folder as the music file.
+Press `R` while a track is loaded to generate a `*_viz.mp4` export.
 
 If `ffmpeg` is available, the renderer will automatically mux the original audio into the output video.
 
 ## Tips
 
 - Drop audio files onto the window to load them directly
+- Press `U` to paste a YouTube link or type a quick search query
 - Use the playlist view to select another track
+<<<<<<< HEAD
 - The rendered video file is saved next to the source audio with `_viz.mp4` appended
 
 ## next ti implement 
 - youtube search
 - multi threading 
+=======
+- Local renders are saved next to the source audio with `_viz.mp4` appended
+- Stream renders are saved in the local `renders/` folder
+>>>>>>> 8f6c8d8 (Refactor code structure for improved readability and maintainability)

@@ -9,7 +9,10 @@ import colorsys
 import math
 import shutil
 import subprocess
+import tempfile
+import re
 from datetime import timedelta
+from urllib.parse import urlparse
 
 # ───────────────── CONFIG ─────────────────
 FPS = 60
@@ -20,14 +23,25 @@ SPRING = 0.16
 DAMPING = 0.95
 
 COLOR_BG = (10, 10, 14)
+COLOR_BG_TOP = (12, 15, 26)
+COLOR_BG_BOTTOM = (8, 10, 16)
 COLOR_TEXT = (230, 230, 230)
 COLOR_TEXT_DIM = (120, 120, 120)
 COLOR_ACCENT = (255, 60, 120)
+COLOR_ACCENT_SOFT = (70, 185, 255)
 COLOR_CTRL = (50, 50, 60)
 COLOR_CTRL_HOVER = (80, 80, 95)
+COLOR_PANEL = (18, 22, 34)
+COLOR_PANEL_ALT = (24, 28, 42)
+COLOR_SUCCESS = (90, 220, 150)
+COLOR_WARNING = (255, 196, 100)
+COLOR_ERROR = (255, 110, 135)
 
 SUPPORTED_FORMATS = {".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".webm", ".opus", ".mp4"}
 SKIP_SECONDS = 10
+STREAM_CACHE_DIR = os.path.join(tempfile.gettempdir(), "musializer_streams")
+STREAM_QUERY_PREFIX = "ytsearch1:"
+STATUS_TIMEOUT_SECONDS = 5.0
 
 BAR_GRAD = [
     (0.78, 1.0, 0.95),
@@ -67,6 +81,34 @@ def ease_out_cubic(t):
 def ease_in_out(t):
     t = max(0.0, min(1.0, t))
     return t * t * (3 - 2 * t)
+
+
+def trim_text(font, text, max_width):
+    if max_width <= 0:
+        return ""
+    if font.size(text)[0] <= max_width:
+        return text
+    ellipsis = "..."
+    while text and font.size(text + ellipsis)[0] > max_width:
+        text = text[:-1]
+    return text + ellipsis
+
+
+def clean_filename(value, fallback="stream"):
+    value = re.sub(r"[^\w\s-]", "", value, flags=re.ASCII).strip().replace(" ", "_")
+    value = re.sub(r"_+", "_", value)
+    return value[:80] or fallback
+
+
+def humanize_source(extractor_key):
+    label = (extractor_key or "stream").replace("_", " ").strip()
+    known = {
+        "youtube": "YouTube",
+        "youtu": "YouTube",
+        "soundcloud": "SoundCloud",
+        "generic": "Online stream",
+    }
+    return known.get(label.lower(), label.title())
 
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
@@ -171,7 +213,13 @@ class AudioVisualizer:
         pygame.mixer.init(44100, -16, 2, 512)
 
         self.screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
-        pygame.display.set_caption("Minimal Audio Visualizer")
+        pygame.display.set_caption("Musializer")
+        self.clipboard_ready = False
+        try:
+            pygame.scrap.init()
+            self.clipboard_ready = True
+        except pygame.error:
+            self.clipboard_ready = False
 
         self.clock = pygame.time.Clock()
         self.running = True
@@ -179,11 +227,17 @@ class AudioVisualizer:
         self.font = pygame.font.SysFont("Segoe UI", 18)
         self.font_big = pygame.font.SysFont("Segoe UI", 36, bold=True)
         self.font_hint = pygame.font.SysFont("Segoe UI", 13)
+        self.font_title = pygame.font.SysFont("Segoe UI", 48, bold=True)
 
         self.file = None
         self.spec = None
         self.times = None
         self.duration = 0
+        self.track_title = ""
+        self.track_source_label = ""
+        self.track_source_detail = ""
+        self.track_query = ""
+        self.render_base_path = None
 
         self.active_bars = 64
         self.heights = np.zeros(MAX_BARS)
@@ -198,11 +252,26 @@ class AudioVisualizer:
         self.rendering = False
         self.last_render_log = 0
         self.render_progress_length = 0
+        self.loading = False
+        self.loading_message = ""
+        self.pending_load = None
+        self.load_request_id = 0
+        self.playback_finished = False
+
+        self.status_message = ""
+        self.status_level = "info"
+        self.status_until = 0.0
+
+        self.show_stream_prompt = False
+        self.stream_input = ""
 
         BW, BH = 115, 38
         self.btn_prev = Button("◀◀  -10s", 0, 0, BW, BH, key_hint="← / A")
         self.btn_play = Button("▶  Play",  0, 0, BW, BH, key_hint="Space")
         self.btn_next = Button("▶▶  +10s", 0, 0, BW, BH, key_hint="→ / D")
+        self.btn_stream = Button("Open URL", 0, 0, 120, 38, key_hint="U")
+        self.btn_render = Button("Export MP4", 0, 0, 130, 38, key_hint="R")
+        self.btn_playlist = Button("Playlist", 0, 0, 110, 38, key_hint="L")
 
         self.playlist_dir = None
         self.playlist = []
@@ -212,73 +281,304 @@ class AudioVisualizer:
         self.show_playlist = False
 
         if start_path:
+            start_path = start_path.strip()
             if os.path.isdir(start_path):
                 self.load_playlist(start_path)
             elif os.path.isfile(start_path):
                 self.load_playlist(os.path.dirname(start_path), start_file=start_path)
+            else:
+                self.open_stream_prompt(seed=start_path)
+        else:
+            default_music_dir = os.path.join(os.getcwd(), "music")
+            if os.path.isdir(default_music_dir) and self.get_supported_files(default_music_dir):
+                self.load_playlist(default_music_dir)
+
+        self.refresh_play_button()
+
+    def set_status(self, message, level="info", seconds=STATUS_TIMEOUT_SECONDS):
+        self.status_message = message
+        self.status_level = level
+        self.status_until = (pygame.time.get_ticks() / 1000.0) + seconds if seconds else 0.0
+
+    def refresh_play_button(self):
+        if self.spec is None or self.loading or self.paused or self.playback_finished:
+            self.btn_play.label = "▶  Play"
+        else:
+            self.btn_play.label = "⏸  Pause"
+
+    def is_url(self, value):
+        parsed = urlparse(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def normalize_stream_target(self, value):
+        value = value.strip()
+        if value.startswith(("www.", "m.", "youtube.com", "youtu.be", "music.youtube.com")):
+            return "https://" + value
+        return value
+
+    def stream_prompt_rect(self):
+        w, h = self.screen.get_size()
+        width = min(760, max(340, w - 60))
+        width = min(width, max(220, w - 20))
+        height = min(190, max(170, h - 20))
+        return pygame.Rect((w - width) // 2, (h - height) // 2, width, height)
+
+    def open_stream_prompt(self, seed=""):
+        if self.rendering:
+            return
+        self.show_stream_prompt = True
+        self.stream_input = seed
+        self.show_playlist = False
+        pygame.key.start_text_input()
+
+    def close_stream_prompt(self):
+        if not self.show_stream_prompt:
+            return
+        self.show_stream_prompt = False
+        pygame.key.stop_text_input()
+
+    def paste_stream_input(self):
+        if not self.clipboard_ready:
+            self.set_status("Clipboard paste is not available on this system.", "warning")
+            return
+        clip = pygame.scrap.get(pygame.SCRAP_TEXT)
+        if not clip:
+            self.set_status("Clipboard is empty.", "warning")
+            return
+        text = clip.decode("utf-8", errors="ignore").replace("\x00", "").strip()
+        if not text:
+            self.set_status("Clipboard is empty.", "warning")
+            return
+        self.stream_input += text
 
     # ───────── SEEK ─────────
     def seek(self, t):
         """Reliable cross-platform seek: stop → rewind → play from t."""
+        if self.spec is None or self.loading:
+            return
         t = max(0.0, min(float(t), self.duration))
         pygame.mixer.music.stop()
-        pygame.mixer.music.play(start=t)          # works on most backends
+        pygame.mixer.music.play(start=t)
         self.start_ticks = pygame.time.get_ticks() - int(t * 1000)
         self.pause_time = t
         self.current_time = t
+        self.playback_finished = False
         if self.paused:
             pygame.mixer.music.pause()
+        self.refresh_play_button()
 
     def skip(self, delta):
         self.seek(self.current_time + delta)
 
     # ───────── TOGGLE PAUSE ─────────
     def toggle_pause(self):
-        if self.spec is None:
+        if self.spec is None or self.loading:
             return
-        if not self.paused:
+        if self.paused or self.playback_finished:
+            if self.playback_finished or self.current_time >= max(0.0, self.duration - 0.1):
+                self.paused = False
+                self.playback_finished = False
+                self.seek(0.0)
+            else:
+                pygame.mixer.music.unpause()
+                self.start_ticks = pygame.time.get_ticks() - int(self.pause_time * 1000)
+                self.paused = False
+                self.playback_finished = False
+        else:
             pygame.mixer.music.pause()
             self.pause_time = self.current_time
             self.paused = True
-            self.btn_play.label = "⏸  Pause"
-        else:
-            pygame.mixer.music.unpause()
-            self.start_ticks = pygame.time.get_ticks() - int(self.pause_time * 1000)
-            self.paused = False
-            self.btn_play.label = "▶  Play"
+        self.refresh_play_button()
 
     # ───────── AUDIO LOAD ─────────
-    def analyze(self, path):
-        ext = os.path.splitext(path)[1].lower()
-        if ext not in SUPPORTED_FORMATS:
-            print(f"[SKIP] Unsupported format: {ext}")
-            print(f"       Supported: {', '.join(sorted(SUPPORTED_FORMATS))}")
+    def start_load(self, source, source_mode="auto"):
+        if self.rendering:
             return
 
+        source = source.strip()
+        if not source:
+            self.set_status("Enter a YouTube link or a search term first.", "warning")
+            return
+
+        self.load_request_id += 1
+        request_id = self.load_request_id
+        self.pending_load = None
+        self.loading = True
+        self.loading_message = "Loading source..."
+        self.playback_finished = False
+        self.pause_time = self.current_time
+        self.paused = True
+        self.refresh_play_button()
+        pygame.mixer.music.stop()
+
+        threading.Thread(
+            target=self._load_source_worker,
+            args=(request_id, source, source_mode),
+            daemon=True,
+        ).start()
+
+    def _load_source_worker(self, request_id, source, source_mode):
+        try:
+            if source_mode == "stream":
+                payload = self.prepare_stream_payload(source)
+            else:
+                payload = self.prepare_local_payload(source)
+            self.pending_load = {"request_id": request_id, "payload": payload, "error": None}
+        except Exception as exc:
+            self.pending_load = {"request_id": request_id, "payload": None, "error": str(exc)}
+
+    def prepare_local_payload(self, path):
+        path = os.path.abspath(path)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in SUPPORTED_FORMATS:
+            supported = ", ".join(sorted(SUPPORTED_FORMATS))
+            raise ValueError(f"Unsupported format: {ext or 'unknown'} ({supported})")
+
         print(f"[LOAD] {os.path.basename(path)}")
+        self.loading_message = f"Analyzing {os.path.basename(path)}..."
 
         y, sr = librosa.load(path, sr=None, mono=True)
-        self.duration = librosa.get_duration(y=y, sr=sr)
-
+        duration = librosa.get_duration(y=y, sr=sr)
         mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=MAX_BARS, hop_length=512)
-        self.spec = librosa.power_to_db(mel, ref=np.max)
-        self.times = librosa.frames_to_time(
-            np.arange(self.spec.shape[1]), sr=sr, hop_length=512
-        )
+        spec = librosa.power_to_db(mel, ref=np.max)
+        times = librosa.frames_to_time(np.arange(spec.shape[1]), sr=sr, hop_length=512)
 
-        self.file = path
+        return {
+            "path": path,
+            "duration": duration,
+            "spec": spec,
+            "times": times,
+            "title": os.path.splitext(os.path.basename(path))[0],
+            "source_label": "Local file",
+            "source_detail": path,
+            "render_base_path": path,
+            "query": "",
+        }
+
+    def prepare_stream_payload(self, query):
+        yt_dlp = shutil.which("yt-dlp")
+        if not yt_dlp:
+            raise RuntimeError("Install `yt-dlp` to open YouTube links or run stream searches.")
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("Install `ffmpeg` to extract audio from online streams.")
+
+        os.makedirs(STREAM_CACHE_DIR, exist_ok=True)
+        query = self.normalize_stream_target(query)
+        target = query if self.is_url(query) else f"{STREAM_QUERY_PREFIX}{query}"
+
+        self.loading_message = "Searching YouTube..." if target.startswith(STREAM_QUERY_PREFIX) else "Fetching stream..."
+
+        cmd = [
+            yt_dlp,
+            "--quiet",
+            "--no-warnings",
+            "--no-playlist",
+            "--no-progress",
+            "--extract-audio",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "--output",
+            os.path.join(STREAM_CACHE_DIR, "%(extractor_key)s-%(id)s.%(ext)s"),
+            "--print",
+            "after_move:%(filepath)s|||%(title)s|||%(extractor_key)s|||%(webpage_url)s",
+            target,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(self.extract_yt_dlp_error(result.stderr or result.stdout))
+
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            raise RuntimeError("The stream was resolved, but no track metadata came back from yt-dlp.")
+
+        if "|||" not in lines[-1]:
+            raise RuntimeError("The stream loaded, but yt-dlp returned incomplete metadata.")
+
+        path, title, extractor_key, webpage_url = lines[-1].split("|||", 3)
+        path = path.strip()
+        title = title.strip() or "Online stream"
+        extractor_key = extractor_key.strip()
+        webpage_url = webpage_url.strip() or query
+
+        if not os.path.exists(path):
+            raise RuntimeError("The stream finished downloading, but the extracted audio file was not found.")
+
+        print(f"[STREAM] {title}")
+        self.loading_message = f"Analyzing {title}..."
+
+        y, sr = librosa.load(path, sr=None, mono=True)
+        duration = librosa.get_duration(y=y, sr=sr)
+        mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=MAX_BARS, hop_length=512)
+        spec = librosa.power_to_db(mel, ref=np.max)
+        times = librosa.frames_to_time(np.arange(spec.shape[1]), sr=sr, hop_length=512)
+
+        render_dir = os.path.join(os.getcwd(), "renders")
+        os.makedirs(render_dir, exist_ok=True)
+
+        return {
+            "path": path,
+            "duration": duration,
+            "spec": spec,
+            "times": times,
+            "title": title,
+            "source_label": humanize_source(extractor_key),
+            "source_detail": webpage_url,
+            "render_base_path": os.path.join(render_dir, clean_filename(title, fallback="stream") + ".mp3"),
+            "query": query,
+        }
+
+    def extract_yt_dlp_error(self, text):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return "Unable to load that stream."
+        return lines[-1].removeprefix("ERROR: ").strip() or "Unable to load that stream."
+
+    def apply_pending_load(self):
+        pending = self.pending_load
+        if not pending:
+            return
+
+        self.pending_load = None
+        if pending["request_id"] != self.load_request_id:
+            return
+
+        self.loading = False
+        self.loading_message = ""
+
+        if pending["error"]:
+            self.set_status(pending["error"], "error", seconds=7.0)
+            self.refresh_play_button()
+            return
+
+        payload = pending["payload"]
+        self.spec = payload["spec"]
+        self.times = payload["times"]
+        self.duration = payload["duration"]
+        self.file = payload["path"]
+        self.track_title = payload["title"]
+        self.track_source_label = payload["source_label"]
+        self.track_source_detail = payload["source_detail"]
+        self.track_query = payload["query"]
+        self.render_base_path = payload["render_base_path"]
+
         self.heights.fill(0)
         self.velocity.fill(0)
 
-        pygame.mixer.music.load(path)
+        pygame.mixer.music.load(self.file)
         pygame.mixer.music.play()
 
         self.start_ticks = pygame.time.get_ticks()
         self.pause_time = 0.0
+        self.current_time = 0.0
         self.paused = False
-        self.btn_play.label = "▶  Play"
+        self.playback_finished = False
+        self.refresh_play_button()
 
-        print("[READY]  Space=Pause  ←/→=±10s  R=Render  L=Playlist  ESC=Exit")
+        print("[READY]  Space=Pause  U=Stream  ←/→=±10s  R=Render  L=Playlist  ESC=Exit")
+        self.set_status(f"Now playing: {self.track_title}", "success", seconds=4.0)
 
     def get_supported_files(self, directory):
         files = []
@@ -306,7 +606,7 @@ class AudioVisualizer:
             print(f"[PLAYLIST] No supported tracks found in {directory}")
 
         if self.playlist:
-            self.analyze(self.playlist[self.playlist_index])
+            self.start_load(self.playlist[self.playlist_index], source_mode="local")
 
     def toggle_playlist(self):
         if not self.playlist:
@@ -331,14 +631,14 @@ class AudioVisualizer:
             return
         self.playlist_index = self.playlist_cursor
         self.show_playlist = False
-        self.analyze(self.playlist[self.playlist_index])
+        self.start_load(self.playlist[self.playlist_index], source_mode="local")
 
     def start_next_track(self):
         if not self.playlist:
             return
         self.playlist_index = (self.playlist_index + 1) % len(self.playlist)
         self.playlist_cursor = self.playlist_index
-        self.analyze(self.playlist[self.playlist_index])
+        self.start_load(self.playlist[self.playlist_index], source_mode="local")
 
     def spectrum_at(self, t):
         idx = np.searchsorted(self.times, t)
@@ -349,6 +649,14 @@ class AudioVisualizer:
 
     # ───────── UPDATE ─────────
     def update(self):
+        self.apply_pending_load()
+
+        if self.status_message and self.status_until:
+            now = pygame.time.get_ticks() / 1000.0
+            if now >= self.status_until:
+                self.status_message = ""
+                self.status_until = 0.0
+
         if self.spec is None:
             return
 
@@ -356,6 +664,7 @@ class AudioVisualizer:
             if self.paused:
                 pygame.mixer.music.unpause()
                 self.paused = False
+                self.refresh_play_button()
             t = (pygame.time.get_ticks() - self.start_ticks) / 1000.0
             track_ended = not pygame.mixer.music.get_busy() and t >= self.duration - 0.1
             if track_ended or t >= self.duration or self.renderer.frame >= self.renderer.total:
@@ -370,6 +679,15 @@ class AudioVisualizer:
                 t = self.pause_time
             else:
                 t = (pygame.time.get_ticks() - self.start_ticks) / 1000.0
+                if not pygame.mixer.music.get_busy() and t >= self.duration - 0.1:
+                    self.current_time = self.duration
+                    self.pause_time = self.duration
+                    self.paused = True
+                    self.playback_finished = True
+                    self.refresh_play_button()
+                    if self.playlist and self.file in self.playlist:
+                        self.start_next_track()
+                    return
 
         self.current_time = min(max(t, 0.0), self.duration)
 
@@ -403,113 +721,433 @@ class AudioVisualizer:
                 self.velocity[i] = math.copysign(abs(diff), self.velocity[i])
             self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
 
-    # ───────── DRAW ─────────
-    def draw(self):
-        self.screen.fill(COLOR_BG)
+    def control_panel_rect(self):
         w, h = self.screen.get_size()
-        mx, my = pygame.mouse.get_pos()
+        margin = 24 if w >= 640 else 12
+        return pygame.Rect(margin, h - 124 - margin, max(220, w - margin * 2), 124)
 
-        if self.spec is None:
-            txt = self.font_big.render("DROP AUDIO FILE", True, COLOR_TEXT)
-            self.screen.blit(txt, (w // 2 - txt.get_width() // 2, h // 2 - 30))
-            lines = [
-                "Supported: MP3 · WAV · OGG · FLAC · AAC · M4A · MP4 · WebM · Opus",
-                "Space = Play/Pause     ← / A = −10s     → / D = +10s     R = Render     ESC = Quit",
-            ]
-            for i, line in enumerate(lines):
-                s = self.font_hint.render(line, True, COLOR_TEXT_DIM)
-                self.screen.blit(s, (w // 2 - s.get_width() // 2, h // 2 + 20 + i * 22))
-            pygame.display.flip()
+    def progress_hit_rect(self):
+        panel = self.control_panel_rect()
+        return pygame.Rect(panel.x + 24, panel.y + 22, panel.w - 48, 18)
+
+    def playlist_overlay_rect(self):
+        w, h = self.screen.get_size()
+        margin = 60 if w >= 780 else 18
+        overlay_w = max(240, w - margin * 2)
+        overlay_h = max(220, min(h - 80, 520))
+        return pygame.Rect((w - overlay_w) // 2, 40, overlay_w, overlay_h)
+
+    def layout_buttons(self, mx=None, my=None):
+        gap = 14
+        panel = self.control_panel_rect()
+        total_ctrl = (
+            self.btn_prev.rect.w + self.btn_play.rect.w + self.btn_next.rect.w + 2 * gap
+        )
+        bx = panel.centerx - total_ctrl // 2
+        by = panel.bottom - self.btn_play.rect.h - 18
+
+        self.btn_prev.update_pos(bx, by)
+        self.btn_play.update_pos(bx + self.btn_prev.rect.w + gap, by)
+        self.btn_next.update_pos(
+            bx + self.btn_prev.rect.w + self.btn_play.rect.w + 2 * gap, by
+        )
+
+        action_buttons = [self.btn_stream]
+        if self.playlist:
+            action_buttons.append(self.btn_playlist)
+        if self.spec is not None and not self.rendering:
+            action_buttons.append(self.btn_render)
+
+        x = self.screen.get_width() - 24
+        for btn in reversed(action_buttons):
+            x -= btn.rect.w
+            btn.update_pos(x, 24)
+            x -= 12
+
+        if mx is not None and my is not None:
+            for btn in (self.btn_prev, self.btn_play, self.btn_next, *action_buttons):
+                btn.check_hover(mx, my)
+
+    def next_available_path(self, path):
+        if not os.path.exists(path):
+            return path
+        stem, ext = os.path.splitext(path)
+        counter = 2
+        while True:
+            candidate = f"{stem}_{counter}{ext}"
+            if not os.path.exists(candidate):
+                return candidate
+            counter += 1
+
+    def start_render(self):
+        if self.spec is None or self.rendering or self.loading:
             return
 
-        # ── Bars ──
-        bar_area_w = w - 120
-        bar_w = bar_area_w / self.active_bars
+        if self.paused:
+            pygame.mixer.music.unpause()
+            self.paused = False
 
-        if self.rendering:
-            base_y = h - 40
-            hue_shift = 0.0
+        if self.playback_finished or not pygame.mixer.music.get_busy():
+            pygame.mixer.music.play(start=self.current_time)
+            self.start_ticks = pygame.time.get_ticks() - int(self.current_time * 1000)
+            self.playback_finished = False
+
+        base = self.render_base_path or self.file
+        out = self.next_available_path(os.path.splitext(base)[0] + "_viz.mp4")
+        out_dir = os.path.dirname(out)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        self.renderer = VideoRenderer(1920, 1080, FPS)
+        self.renderer.start(out, self.duration, audio_source=self.file)
+        self.rendering = True
+        self.refresh_play_button()
+        self.set_status(f"Rendering to {os.path.basename(out)}", "info", seconds=4.0)
+
+    def submit_stream_prompt(self):
+        value = self.stream_input.strip()
+        if not value:
+            self.set_status("Paste a link or type a search to start playback.", "warning")
+            return
+        self.close_stream_prompt()
+        self.start_load(value, source_mode="stream")
+
+    def handle_stream_prompt_event(self, event):
+        if not self.show_stream_prompt:
+            return False
+
+        if event.type == pygame.TEXTINPUT:
+            if len(self.stream_input) < 300:
+                self.stream_input += event.text
+            return True
+
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self.close_stream_prompt()
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.submit_stream_prompt()
+            elif event.key == pygame.K_BACKSPACE:
+                self.stream_input = self.stream_input[:-1]
+            elif event.key == pygame.K_v and event.mod & pygame.KMOD_CTRL:
+                self.paste_stream_input()
+            return True
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if not self.stream_prompt_rect().collidepoint(event.pos):
+                self.close_stream_prompt()
+            return True
+
+        return False
+
+    def draw_background(self, w, h):
+        for y in range(h):
+            t = y / max(h - 1, 1)
+            color = (
+                int(lerp(COLOR_BG_TOP[0], COLOR_BG_BOTTOM[0], t)),
+                int(lerp(COLOR_BG_TOP[1], COLOR_BG_BOTTOM[1], t)),
+                int(lerp(COLOR_BG_TOP[2], COLOR_BG_BOTTOM[2], t)),
+            )
+            pygame.draw.line(self.screen, color, (0, y), (w, y))
+
+        glow = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.circle(glow, (255, 70, 140, 28), (int(w * 0.18), int(h * 0.22)), 180)
+        pygame.draw.circle(glow, (80, 190, 255, 24), (int(w * 0.82), int(h * 0.26)), 220)
+        pygame.draw.circle(glow, (255, 220, 120, 16), (int(w * 0.50), int(h * 0.85)), 280)
+        self.screen.blit(glow, (0, 0))
+
+    def draw_top_actions(self):
+        action_buttons = [self.btn_stream]
+        if self.playlist:
+            action_buttons.append(self.btn_playlist)
+        if self.spec is not None and not self.rendering:
+            action_buttons.append(self.btn_render)
+
+        for btn in action_buttons:
+            btn.draw(self.screen, self.font, self.font_hint)
+
+    def draw_empty_state(self, w, h):
+        panel_w = max(260, w - 120)
+        panel_h = max(320, min(h - 180, 420))
+        panel = pygame.Rect(max(18, (w - panel_w) // 2), max(92, (h - panel_h) // 2 - 20), panel_w, panel_h)
+        pygame.draw.rect(self.screen, COLOR_PANEL, panel, border_radius=26)
+        pygame.draw.rect(self.screen, (52, 60, 84), panel, 1, border_radius=26)
+
+        title = self.font_title.render("Musializer", True, COLOR_TEXT)
+        subtitle = self.font.render(
+            "Visualize local tracks, YouTube links, and quick stream searches in one place.",
+            True,
+            COLOR_TEXT_DIM,
+        )
+        self.screen.blit(title, (panel.x + 32, panel.y + 32))
+        self.screen.blit(subtitle, (panel.x + 32, panel.y + 92))
+
+        cards_top = panel.y + 140
+        card_gap = 20
+        if panel.w >= 760:
+            card_w = (panel.w - 64 - card_gap) // 2
+            local_rect = pygame.Rect(panel.x + 32, cards_top, card_w, 156)
+            stream_rect = pygame.Rect(local_rect.right + card_gap, cards_top, card_w, 156)
         else:
-            prog_y = h - 95
-            base_y = prog_y - 20
-            hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
+            card_w = panel.w - 64
+            local_rect = pygame.Rect(panel.x + 32, cards_top, card_w, 132)
+            stream_rect = pygame.Rect(panel.x + 32, local_rect.bottom + 18, card_w, 132)
 
-        max_h = self.screen.get_height() * 0.60
-        for i in range(self.active_bars):
-            bh = self.heights[i]
-            if bh < 1:
-                continue
-            color = bar_color(i, self.active_bars, hue_shift)
+        for rect, accent in ((local_rect, COLOR_ACCENT), (stream_rect, COLOR_ACCENT_SOFT)):
+            pygame.draw.rect(self.screen, COLOR_PANEL_ALT, rect, border_radius=20)
+            pygame.draw.rect(self.screen, accent, rect, 2, border_radius=20)
+
+        local_title = self.font_big.render("Local library", True, COLOR_TEXT)
+        self.screen.blit(local_title, (local_rect.x + 20, local_rect.y + 18))
+        local_lines = [
+            "Drop an audio or video file anywhere in the window.",
+            "Open a folder from the CLI to get playlist navigation.",
+            "Supports MP3, WAV, OGG, FLAC, AAC, M4A, MP4, WebM, and Opus.",
+        ]
+        for idx, line in enumerate(local_lines):
+            label = self.font_hint.render(line, True, COLOR_TEXT_DIM)
+            self.screen.blit(label, (local_rect.x + 20, local_rect.y + 62 + idx * 24))
+
+        stream_title = self.font_big.render("Online stream", True, COLOR_TEXT)
+        self.screen.blit(stream_title, (stream_rect.x + 20, stream_rect.y + 18))
+        stream_lines = [
+            "Press U to paste a YouTube link or type a quick search.",
+            "Ctrl+V works in the input box when clipboard access is available.",
+            "Downloaded audio is cached automatically for playback and export.",
+        ]
+        for idx, line in enumerate(stream_lines):
+            label = self.font_hint.render(line, True, COLOR_TEXT_DIM)
+            self.screen.blit(label, (stream_rect.x + 20, stream_rect.y + 62 + idx * 24))
+
+        footer = self.font_hint.render(
+            "Controls: Space play/pause   Left/Right seek   R export video   Esc quit",
+            True,
+            COLOR_TEXT_DIM,
+        )
+        self.screen.blit(footer, (panel.x + 32, panel.bottom - 32))
+
+    def draw_header(self, w):
+        header_w = min(760, max(280, w - 260))
+        header_w = min(header_w, w - 48)
+        header = pygame.Rect(24, 24, header_w, 118)
+        pygame.draw.rect(self.screen, COLOR_PANEL, header, border_radius=22)
+        pygame.draw.rect(self.screen, (50, 58, 82), header, 1, border_radius=22)
+
+        badge_text = self.track_source_label or "Track"
+        badge = self.font_hint.render(badge_text, True, COLOR_TEXT)
+        badge_rect = pygame.Rect(header.x + 24, header.y + 18, badge.get_width() + 22, 28)
+        pygame.draw.rect(self.screen, COLOR_ACCENT_SOFT, badge_rect, border_radius=14)
+        self.screen.blit(badge, (badge_rect.x + 11, badge_rect.y + 7))
+
+        title = trim_text(self.font_big, self.track_title or "Untitled", header.w - 48)
+        title_surface = self.font_big.render(title, True, COLOR_TEXT)
+        self.screen.blit(title_surface, (header.x + 24, header.y + 52))
+
+        detail = trim_text(self.font_hint, self.track_source_detail or self.file or "", header.w - 48)
+        detail_surface = self.font_hint.render(detail, True, COLOR_TEXT_DIM)
+        self.screen.blit(detail_surface, (header.x + 24, header.y + 92))
+
+        if self.playlist and self.file in self.playlist:
+            queue_text = f"Track {self.playlist_index + 1}/{len(self.playlist)} in playlist"
+            queue_surface = self.font_hint.render(queue_text, True, COLOR_TEXT_DIM)
+            self.screen.blit(queue_surface, (header.right - queue_surface.get_width() - 18, header.y + 20))
+
+    def draw_controls(self, mx, my):
+        panel = self.control_panel_rect()
+        pygame.draw.rect(self.screen, COLOR_PANEL, panel, border_radius=24)
+        pygame.draw.rect(self.screen, (50, 58, 82), panel, 1, border_radius=24)
+
+        prog_hit = self.progress_hit_rect()
+        prog_x = prog_hit.x
+        prog_y = prog_hit.y + 7
+        prog_w = prog_hit.w
+        prog_h = 5
+
+        pygame.draw.rect(self.screen, (42, 48, 66), (prog_x, prog_y, prog_w, prog_h), border_radius=4)
+
+        progress = self.current_time / self.duration if self.duration > 0 else 0
+        fill = int(prog_w * progress)
+        if fill > 0:
+            pygame.draw.rect(self.screen, COLOR_ACCENT, (prog_x, prog_y, fill, prog_h), border_radius=4)
+
+        if prog_hit.collidepoint(mx, my):
             pygame.draw.rect(
-                self.screen, color,
-                (60 + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh)
+                self.screen,
+                (255, 255, 255),
+                (prog_x, prog_y - 3, prog_w, prog_h + 6),
+                1,
+                border_radius=5,
             )
 
-        if not self.rendering:
-            # ── Progress bar ──
-            prog_y = h - 95
-            prog_x = 60
-            prog_w = w - 120
-            prog_h = 5
-            prog_rect = pygame.Rect(prog_x, prog_y - 6, prog_w, prog_h + 12)
+        time_txt = f"{timedelta(seconds=int(self.current_time))} / {timedelta(seconds=int(self.duration))}"
+        ts = self.font.render(time_txt, True, COLOR_TEXT_DIM)
+        self.screen.blit(ts, (panel.centerx - ts.get_width() // 2, panel.y + 42))
 
-            pygame.draw.rect(self.screen, (40, 40, 40), (prog_x, prog_y, prog_w, prog_h), border_radius=3)
+        for btn in (self.btn_prev, self.btn_play, self.btn_next):
+            btn.draw(self.screen, self.font, self.font_hint)
 
-            progress = self.current_time / self.duration if self.duration > 0 else 0
-            fill = int(prog_w * progress)
-            if fill > 0:
-                pygame.draw.rect(self.screen, COLOR_ACCENT, (prog_x, prog_y, fill, prog_h), border_radius=3)
+    def draw_playlist_overlay(self):
+        overlay_rect = self.playlist_overlay_rect()
+        overlay = pygame.Surface((overlay_rect.w, overlay_rect.h), pygame.SRCALPHA)
+        overlay.fill((10, 12, 18, 228))
+        pygame.draw.rect(overlay, (50, 58, 82), (0, 0, overlay_rect.w, overlay_rect.h), 1, border_radius=18)
 
-            # Highlight on hover
-            if prog_rect.collidepoint(mx, my):
-                pygame.draw.rect(self.screen, (255, 255, 255), (prog_x, prog_y, prog_w, prog_h), 1, border_radius=3)
+        title = self.font_big.render("Playlist", True, COLOR_TEXT)
+        overlay.blit(title, (24, 18))
+        help_text = self.font_hint.render(
+            "L / Esc close   Up / Down move   Enter or click to play",
+            True,
+            COLOR_TEXT_DIM,
+        )
+        overlay.blit(help_text, (24, 64))
 
-            # Timestamp
-            time_txt = (
-                f"{timedelta(seconds=int(self.current_time))} / "
-                f"{timedelta(seconds=int(self.duration))}"
+        visible_lines = 10
+        for idx in range(self.playlist_scroll, min(len(self.playlist), self.playlist_scroll + visible_lines)):
+            row = pygame.Rect(18, 96 + (idx - self.playlist_scroll) * 36, overlay_rect.w - 36, 30)
+            if idx == self.playlist_cursor:
+                pygame.draw.rect(overlay, (36, 42, 58), row, border_radius=10)
+            name = trim_text(self.font, os.path.basename(self.playlist[idx]), row.w - 24)
+            prefix = "▶ " if idx == self.playlist_index else "   "
+            color = COLOR_ACCENT if idx == self.playlist_cursor else COLOR_TEXT
+            item = self.font.render(f"{prefix}{idx + 1:02d}. {name}", True, color)
+            overlay.blit(item, (row.x + 10, row.y + 5))
+
+        self.screen.blit(overlay, overlay_rect.topleft)
+
+    def draw_status_toast(self):
+        if not self.status_message:
+            return
+
+        colors = {
+            "info": COLOR_ACCENT_SOFT,
+            "success": COLOR_SUCCESS,
+            "warning": COLOR_WARNING,
+            "error": COLOR_ERROR,
+        }
+        border = colors.get(self.status_level, COLOR_ACCENT_SOFT)
+        toast_y = 160 if self.spec is not None else self.screen.get_height() - 76
+        toast = pygame.Rect(24, toast_y, min(self.screen.get_width() - 48, 560), 42)
+        pygame.draw.rect(self.screen, COLOR_PANEL_ALT, toast, border_radius=14)
+        pygame.draw.rect(self.screen, border, toast, 2, border_radius=14)
+        text = trim_text(self.font, self.status_message, toast.w - 24)
+        label = self.font.render(text, True, COLOR_TEXT)
+        self.screen.blit(label, (toast.x + 12, toast.y + 11))
+
+    def draw_loading_overlay(self):
+        w, h = self.screen.get_size()
+        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
+        overlay.fill((6, 8, 12, 165))
+
+        panel = pygame.Rect(w // 2 - 220, h // 2 - 70, 440, 140)
+        pygame.draw.rect(overlay, COLOR_PANEL, panel, border_radius=24)
+        pygame.draw.rect(overlay, (64, 72, 96), panel, 1, border_radius=24)
+
+        center = (panel.x + 42, panel.y + 70)
+        ticks = pygame.time.get_ticks() / 180.0
+        for i in range(10):
+            angle = ticks + i * 0.55
+            alpha = 30 + i * 18
+            dot_x = center[0] + int(math.cos(angle) * 16)
+            dot_y = center[1] + int(math.sin(angle) * 16)
+            pygame.draw.circle(overlay, (255, 255, 255, alpha), (dot_x, dot_y), 4)
+
+        title = self.font_big.render("Loading source", True, COLOR_TEXT)
+        overlay.blit(title, (panel.x + 82, panel.y + 34))
+        detail = self.font.render(self.loading_message or "Please wait...", True, COLOR_TEXT_DIM)
+        overlay.blit(detail, (panel.x + 82, panel.y + 78))
+
+        self.screen.blit(overlay, (0, 0))
+
+    def draw_stream_prompt_overlay(self):
+        w, h = self.screen.get_size()
+        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
+        overlay.fill((4, 6, 10, 180))
+
+        rect = self.stream_prompt_rect()
+        pygame.draw.rect(overlay, COLOR_PANEL, rect, border_radius=24)
+        pygame.draw.rect(overlay, (64, 72, 96), rect, 1, border_radius=24)
+
+        title = self.font_big.render("Open online stream", True, COLOR_TEXT)
+        overlay.blit(title, (rect.x + 24, rect.y + 22))
+
+        hint = self.font_hint.render(
+            "Paste a YouTube link or type a search. Enter loads it, Ctrl+V pastes, Esc closes.",
+            True,
+            COLOR_TEXT_DIM,
+        )
+        overlay.blit(hint, (rect.x + 24, rect.y + 64))
+
+        input_rect = pygame.Rect(rect.x + 24, rect.y + 96, rect.w - 48, 54)
+        pygame.draw.rect(overlay, COLOR_PANEL_ALT, input_rect, border_radius=16)
+        pygame.draw.rect(overlay, COLOR_ACCENT_SOFT, input_rect, 2, border_radius=16)
+
+        entry = self.stream_input.strip() or "https://youtu.be/... or a song title"
+        entry_color = COLOR_TEXT if self.stream_input.strip() else COLOR_TEXT_DIM
+        rendered = trim_text(self.font, entry, input_rect.w - 28)
+        entry_surface = self.font.render(rendered, True, entry_color)
+        overlay.blit(entry_surface, (input_rect.x + 14, input_rect.y + 18))
+
+        if self.stream_input and (pygame.time.get_ticks() // 500) % 2 == 0:
+            caret_x = min(input_rect.right - 16, input_rect.x + 14 + entry_surface.get_width() + 2)
+            pygame.draw.line(
+                overlay,
+                COLOR_TEXT,
+                (caret_x, input_rect.y + 14),
+                (caret_x, input_rect.y + input_rect.h - 14),
+                2,
             )
-            ts = self.font.render(time_txt, True, COLOR_TEXT_DIM)
-            self.screen.blit(ts, (w // 2 - ts.get_width() // 2, prog_y - 24))
 
-            # ── Control buttons ──
-            BW, BH = 115, 38
-            gap = 14
-            total_ctrl = 3 * BW + 2 * gap
-            bx = w // 2 - total_ctrl // 2
-            by = h - 60
+        self.screen.blit(overlay, (0, 0))
 
-            self.btn_prev.update_pos(bx, by)
-            self.btn_play.update_pos(bx + BW + gap, by)
-            self.btn_next.update_pos(bx + 2 * (BW + gap), by)
+    # ───────── DRAW ─────────
+    def draw(self):
+        w, h = self.screen.get_size()
+        mx, my = pygame.mouse.get_pos()
+        self.layout_buttons(mx, my)
+        self.draw_background(w, h)
+        self.draw_top_actions()
 
-            for btn in (self.btn_prev, self.btn_play, self.btn_next):
-                btn.check_hover(mx, my)
-                btn.draw(self.screen, self.font, self.font_hint)
+        if self.spec is None:
+            self.draw_empty_state(w, h)
+        else:
+            self.draw_header(w)
+
+            bar_area_x = 60
+            bar_area_w = w - 120
+            bar_w = bar_area_w / self.active_bars
+
+            if self.rendering:
+                base_y = h - 40
+                hue_shift = 0.0
+            else:
+                base_y = self.control_panel_rect().y - 28
+                hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
+
+            max_h = self.screen.get_height() * 0.56
+            for i in range(self.active_bars):
+                bh = self.heights[i]
+                if bh < 1:
+                    continue
+                color = bar_color(i, self.active_bars, hue_shift)
+                pygame.draw.rect(
+                    self.screen,
+                    color,
+                    (bar_area_x + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh),
+                    border_radius=2,
+                )
+
+            if not self.rendering:
+                self.draw_controls(mx, my)
 
         if self.show_playlist and not self.rendering:
-            overlay_w = w - 120
-            overlay_h = min(h - 120, 520)
-            overlay = pygame.Surface((overlay_w, overlay_h), pygame.SRCALPHA)
-            overlay.fill((10, 12, 18, 220))
-            pygame.draw.rect(overlay, (40, 42, 52), (0, 0, overlay_w, overlay_h), border_radius=14)
+            self.draw_playlist_overlay()
 
-            title = self.font_big.render("Playlist", True, COLOR_TEXT)
-            overlay.blit(title, (24, 18))
-            help_text = self.font_hint.render(
-                "L / Esc = Close   ↑ / ↓ = Navigate   Enter = Play", True, COLOR_TEXT_DIM
-            )
-            overlay.blit(help_text, (24, 64))
+        self.draw_status_toast()
 
-            visible_lines = 10
-            for idx in range(self.playlist_scroll, min(len(self.playlist), self.playlist_scroll + visible_lines)):
-                name = os.path.basename(self.playlist[idx])
-                prefix = "▶ " if idx == self.playlist_index else "   "
-                color = COLOR_ACCENT if idx == self.playlist_cursor else COLOR_TEXT
-                item = self.font.render(f"{prefix}{idx + 1:02d}. {name}", True, color)
-                overlay.blit(item, (24, 104 + (idx - self.playlist_scroll) * 32))
+        if self.show_stream_prompt:
+            self.draw_stream_prompt_overlay()
 
-            self.screen.blit(overlay, (60, 40))
+        if self.loading:
+            self.draw_loading_overlay()
 
         pygame.display.flip()
 
@@ -518,24 +1156,28 @@ class AudioVisualizer:
 
     # ───────── RUN ─────────
     def run(self):
-        print("MINIMAL VISUALIZER READY — drop an audio/video file onto the window. Press L to open the playlist.")
+        print("MUSIALIZER READY — drop audio/video, press U for YouTube/search, press L for playlists.")
 
         while self.running:
             for e in pygame.event.get():
-
-                # ── Quit ──
                 if e.type == pygame.QUIT:
                     self.running = False
+                    continue
 
-                # ── Drop file ──
-                elif e.type == pygame.DROPFILE and not self.rendering:
-                    threading.Thread(target=self.analyze, args=(e.file,), daemon=True).start()
+                if self.handle_stream_prompt_event(e):
+                    continue
 
-                # ── Keyboard  (checked independently — NOT elif) ──
+                if e.type == pygame.DROPFILE and not self.rendering and not self.loading:
+                    if os.path.isdir(e.file):
+                        self.load_playlist(e.file)
+                    elif os.path.isfile(e.file):
+                        self.load_playlist(os.path.dirname(e.file), start_file=e.file)
+                    else:
+                        self.set_status("That drop target is not a supported file or folder.", "warning")
+                    continue
+
                 if e.type == pygame.KEYDOWN:
-                    if e.key == pygame.K_l and self.playlist:
-                        self.toggle_playlist()
-                    elif self.show_playlist:
+                    if self.show_playlist:
                         if e.key in (pygame.K_ESCAPE, pygame.K_l):
                             self.show_playlist = False
                         elif e.key == pygame.K_UP:
@@ -544,43 +1186,63 @@ class AudioVisualizer:
                             self.move_playlist_cursor(1)
                         elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                             self.select_playlist_item()
-                    else:
-                        if e.key == pygame.K_ESCAPE:
-                            self.running = False
+                        continue
 
-                        elif e.key == pygame.K_SPACE:
-                            self.toggle_pause()
+                    if e.key == pygame.K_ESCAPE:
+                        self.running = False
+                    elif e.key == pygame.K_u:
+                        self.open_stream_prompt()
+                    elif e.key == pygame.K_l and self.playlist:
+                        self.toggle_playlist()
+                    elif e.key == pygame.K_SPACE:
+                        self.toggle_pause()
+                    elif e.key in (pygame.K_LEFT, pygame.K_a) and self.spec is not None:
+                        self.skip(-SKIP_SECONDS)
+                    elif e.key in (pygame.K_RIGHT, pygame.K_d) and self.spec is not None:
+                        self.skip(SKIP_SECONDS)
+                    elif e.key == pygame.K_r and self.spec is not None and not self.rendering:
+                        self.start_render()
 
-                        elif e.key in (pygame.K_LEFT, pygame.K_a) and self.spec is not None:
-                            self.skip(-SKIP_SECONDS)
-
-                        elif e.key in (pygame.K_RIGHT, pygame.K_d) and self.spec is not None:
-                            self.skip(SKIP_SECONDS)
-
-                        elif e.key == pygame.K_r and self.spec is not None and not self.rendering:
-                            if self.paused:
-                                pygame.mixer.music.unpause()
-                                self.paused = False
-                            if not pygame.mixer.music.get_busy():
-                                pygame.mixer.music.play(start=self.current_time)
-                                self.start_ticks = pygame.time.get_ticks() - int(self.current_time * 1000)
-                            out = os.path.splitext(self.file)[0] + "_viz.mp4"
-                            self.renderer = VideoRenderer(1920, 1080, FPS)
-                            self.renderer.start(out, self.duration, audio_source=self.file)
-                            self.rendering = True
-
-                # ── Mouse clicks (also independent) ──
                 if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-                    w, h = self.screen.get_size()
-                    prog_x, prog_y = 60, h - 95
-                    prog_w = w - 120
+                    self.layout_buttons(*e.pos)
 
-                    # Progress bar seek
-                    if self.spec is not None and pygame.Rect(prog_x, prog_y - 6, prog_w, 17).collidepoint(e.pos):
-                        ratio = (e.pos[0] - prog_x) / prog_w
+                    if self.btn_stream.is_clicked(e):
+                        self.open_stream_prompt()
+                        continue
+
+                    if self.playlist and self.btn_playlist.is_clicked(e):
+                        self.toggle_playlist()
+                        continue
+
+                    if self.spec is not None and not self.rendering and self.btn_render.is_clicked(e):
+                        self.start_render()
+                        continue
+
+                    if self.show_playlist:
+                        overlay = self.playlist_overlay_rect()
+                        if not overlay.collidepoint(e.pos):
+                            self.show_playlist = False
+                        else:
+                            visible_lines = 10
+                            for idx in range(
+                                self.playlist_scroll,
+                                min(len(self.playlist), self.playlist_scroll + visible_lines),
+                            ):
+                                row = pygame.Rect(
+                                    overlay.x + 18,
+                                    overlay.y + 96 + (idx - self.playlist_scroll) * 36,
+                                    overlay.w - 36,
+                                    30,
+                                )
+                                if row.collidepoint(e.pos):
+                                    self.playlist_cursor = idx
+                                    self.select_playlist_item()
+                                    break
+                        continue
+
+                    if self.spec is not None and self.progress_hit_rect().collidepoint(e.pos):
+                        ratio = (e.pos[0] - self.progress_hit_rect().x) / self.progress_hit_rect().w
                         self.seek(ratio * self.duration)
-
-                    # Buttons
                     elif self.spec is not None:
                         if self.btn_prev.is_clicked(e):
                             self.skip(-SKIP_SECONDS)
