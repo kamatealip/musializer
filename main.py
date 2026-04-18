@@ -36,6 +36,10 @@ COLOR_PANEL_ALT = (24, 28, 42)
 COLOR_SUCCESS = (90, 220, 150)
 COLOR_WARNING = (255, 196, 100)
 COLOR_ERROR = (255, 110, 135)
+COLOR_TERMINAL_BG = (9, 13, 10)
+COLOR_TERMINAL_BORDER = (86, 214, 132)
+COLOR_TERMINAL_TEXT = (188, 255, 208)
+COLOR_TERMINAL_DIM = (104, 164, 121)
 
 SUPPORTED_FORMATS = {".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".webm", ".opus", ".mp4"}
 SKIP_SECONDS = 10
@@ -114,6 +118,15 @@ def humanize_source(extractor_key):
 def load_ui_font(size, bold=False):
     font_path = pygame.font.match_font(
         ["inter", "segoeui", "segoe ui", "noto sans", "dejavu sans", "liberation sans"]
+    )
+    font = pygame.font.Font(font_path, size) if font_path else pygame.font.Font(None, size)
+    font.set_bold(bold)
+    return font
+
+
+def load_mono_font(size, bold=False):
+    font_path = pygame.font.match_font(
+        ["jetbrainsmono", "firacode", "consolas", "dejavu sans mono", "liberation mono"]
     )
     font = pygame.font.Font(font_path, size) if font_path else pygame.font.Font(None, size)
     font.set_bold(bold)
@@ -238,6 +251,7 @@ class AudioVisualizer:
         self.font_hint = load_ui_font(14)
         self.font_title = load_ui_font(48, bold=True)
         self.font_track = load_ui_font(15)
+        self.font_prompt = load_mono_font(18)
 
         self.file = None
         self.spec = None
@@ -328,10 +342,10 @@ class AudioVisualizer:
 
     def stream_prompt_rect(self):
         w, h = self.screen.get_size()
-        width = min(760, max(340, w - 60))
+        width = min(720, max(320, w - 36))
         width = min(width, max(220, w - 20))
-        height = min(190, max(170, h - 20))
-        return pygame.Rect((w - width) // 2, (h - height) // 2, width, height)
+        height = 84
+        return pygame.Rect(18, h - height - 18, width, height)
 
     def open_stream_prompt(self, seed=""):
         if self.rendering:
@@ -946,38 +960,38 @@ class AudioVisualizer:
         self.screen.blit(overlay, (0, 0))
 
     def draw_stream_prompt_overlay(self):
-        w, h = self.screen.get_size()
-        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
-        overlay.fill((4, 6, 10, 180))
-
         rect = self.stream_prompt_rect()
-        pygame.draw.rect(overlay, COLOR_PANEL, rect, border_radius=24)
-        pygame.draw.rect(overlay, (64, 72, 96), rect, 1, border_radius=24)
+        panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        panel.fill((0, 0, 0, 0))
+        pygame.draw.rect(panel, (6, 10, 8, 235), (0, 0, rect.w, rect.h), border_radius=10)
+        pygame.draw.rect(panel, COLOR_TERMINAL_BORDER, (0, 0, rect.w, rect.h), 1, border_radius=10)
 
-        title = self.font.render("Open stream", True, COLOR_TEXT)
-        overlay.blit(title, (rect.x + 24, rect.y + 24))
+        prompt_label = self.font_hint.render("yt-search", True, COLOR_TERMINAL_DIM)
+        panel.blit(prompt_label, (14, 10))
 
-        input_rect = pygame.Rect(rect.x + 24, rect.y + 68, rect.w - 48, 54)
-        pygame.draw.rect(overlay, COLOR_PANEL_ALT, input_rect, border_radius=16)
-        pygame.draw.rect(overlay, COLOR_ACCENT_SOFT, input_rect, 2, border_radius=16)
+        prompt_x = 14
+        prompt_y = 36
+        prompt_surface = self.font_prompt.render(">", True, COLOR_TERMINAL_BORDER)
+        panel.blit(prompt_surface, (prompt_x, prompt_y))
 
-        entry = self.stream_input.strip() or "https://youtu.be/... or a song title"
-        entry_color = COLOR_TEXT if self.stream_input.strip() else COLOR_TEXT_DIM
-        rendered = trim_text(self.font, entry, input_rect.w - 28)
-        entry_surface = self.font.render(rendered, True, entry_color)
-        overlay.blit(entry_surface, (input_rect.x + 14, input_rect.y + 18))
+        entry = self.stream_input or "paste link or type search"
+        entry_color = COLOR_TERMINAL_TEXT if self.stream_input else COLOR_TERMINAL_DIM
+        text_x = prompt_x + prompt_surface.get_width() + 12
+        rendered = trim_text(self.font_prompt, entry, rect.w - text_x - 16)
+        entry_surface = self.font_prompt.render(rendered, True, entry_color)
+        panel.blit(entry_surface, (text_x, prompt_y))
 
         if self.stream_input and (pygame.time.get_ticks() // 500) % 2 == 0:
-            caret_x = min(input_rect.right - 16, input_rect.x + 14 + entry_surface.get_width() + 2)
+            caret_x = min(rect.w - 16, text_x + entry_surface.get_width() + 2)
             pygame.draw.line(
-                overlay,
-                COLOR_TEXT,
-                (caret_x, input_rect.y + 14),
-                (caret_x, input_rect.y + input_rect.h - 14),
+                panel,
+                COLOR_TERMINAL_TEXT,
+                (caret_x, prompt_y + 2),
+                (caret_x, prompt_y + self.font_prompt.get_height() - 2),
                 2,
             )
 
-        self.screen.blit(overlay, (0, 0))
+        self.screen.blit(panel, rect.topleft)
 
     # ───────── DRAW ─────────
     def draw(self):
