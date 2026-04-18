@@ -110,6 +110,15 @@ def humanize_source(extractor_key):
     }
     return known.get(label.lower(), label.title())
 
+
+def load_ui_font(size, bold=False):
+    font_path = pygame.font.match_font(
+        ["inter", "segoeui", "segoe ui", "noto sans", "dejavu sans", "liberation sans"]
+    )
+    font = pygame.font.Font(font_path, size) if font_path else pygame.font.Font(None, size)
+    font.set_bold(bold)
+    return font
+
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
     def __init__(self, w, h, fps):
@@ -224,10 +233,11 @@ class AudioVisualizer:
         self.clock = pygame.time.Clock()
         self.running = True
 
-        self.font = pygame.font.SysFont("Segoe UI", 18)
-        self.font_big = pygame.font.SysFont("Segoe UI", 36, bold=True)
-        self.font_hint = pygame.font.SysFont("Segoe UI", 13)
-        self.font_title = pygame.font.SysFont("Segoe UI", 48, bold=True)
+        self.font = load_ui_font(18)
+        self.font_big = load_ui_font(36, bold=True)
+        self.font_hint = load_ui_font(14)
+        self.font_title = load_ui_font(48, bold=True)
+        self.font_track = load_ui_font(15)
 
         self.file = None
         self.spec = None
@@ -813,20 +823,7 @@ class AudioVisualizer:
         return False
 
     def draw_background(self, w, h):
-        for y in range(h):
-            t = y / max(h - 1, 1)
-            color = (
-                int(lerp(COLOR_BG_TOP[0], COLOR_BG_BOTTOM[0], t)),
-                int(lerp(COLOR_BG_TOP[1], COLOR_BG_BOTTOM[1], t)),
-                int(lerp(COLOR_BG_TOP[2], COLOR_BG_BOTTOM[2], t)),
-            )
-            pygame.draw.line(self.screen, color, (0, y), (w, y))
-
-        glow = pygame.Surface((w, h), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (255, 70, 140, 28), (int(w * 0.18), int(h * 0.22)), 180)
-        pygame.draw.circle(glow, (80, 190, 255, 24), (int(w * 0.82), int(h * 0.26)), 220)
-        pygame.draw.circle(glow, (255, 220, 120, 16), (int(w * 0.50), int(h * 0.85)), 280)
-        self.screen.blit(glow, (0, 0))
+        self.screen.fill(COLOR_BG)
 
     def draw_top_actions(self):
         return
@@ -847,11 +844,6 @@ class AudioVisualizer:
         prog_w = prog_hit.w
         prog_h = 2
 
-        title = trim_text(self.font_hint, self.track_title or "", prog_w)
-        if title:
-            label = self.font_hint.render(title, True, COLOR_TEXT_DIM)
-            self.screen.blit(label, (prog_x, prog_hit.y - 22))
-
         pygame.draw.rect(self.screen, (42, 48, 66), (prog_x, prog_y, prog_w, prog_h), border_radius=2)
 
         progress = self.current_time / self.duration if self.duration > 0 else 0
@@ -871,6 +863,11 @@ class AudioVisualizer:
         knob_x = prog_x + fill
         knob_x = max(prog_x, min(prog_x + prog_w, knob_x))
         pygame.draw.circle(self.screen, COLOR_ACCENT, (knob_x, prog_y + prog_h // 2), 4)
+
+        title = trim_text(self.font_track, self.track_title or "", prog_w)
+        if title:
+            label = self.font_track.render(title, True, COLOR_TEXT_DIM)
+            self.screen.blit(label, (prog_x, prog_hit.bottom + 10))
 
     def draw_playlist_overlay(self):
         overlay_rect = self.playlist_overlay_rect()
@@ -1013,8 +1010,8 @@ class AudioVisualizer:
                     border_radius=2,
                 )
 
-                if not self.rendering:
-                    self.draw_controls(mx, my)
+            if not self.rendering:
+                self.draw_controls(mx, my)
 
         if self.show_playlist and not self.rendering:
             self.draw_playlist_overlay()
