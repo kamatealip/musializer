@@ -76,6 +76,74 @@ def bar_color(i, n, hue_shift=0.0):
     return hsv(h, s, v)
 
 
+def brighten(color, amount=0.25):
+    return tuple(min(255, int(channel + (255 - channel) * amount)) for channel in color)
+
+
+def with_alpha(color, alpha):
+    return (color[0], color[1], color[2], alpha)
+
+
+def blend_color(a, b, t=0.5):
+    return (
+        int(lerp(a[0], b[0], t)),
+        int(lerp(a[1], b[1], t)),
+        int(lerp(a[2], b[2], t)),
+    )
+
+
+def draw_glow_circle(surface, color, pos, radii_and_alpha):
+    glow = brighten(color, 0.35)
+    for radius, alpha in radii_and_alpha:
+        if radius > 0 and alpha > 0:
+            pygame.draw.circle(surface, with_alpha(glow, alpha), pos, radius)
+
+
+def draw_glow_ellipse(surface, color, center, sizes_and_alpha):
+    glow = brighten(color, 0.35)
+    cx, cy = int(center[0]), int(center[1])
+    for width, height, alpha in sizes_and_alpha:
+        if width <= 0 or height <= 0 or alpha <= 0:
+            continue
+        rect = pygame.Rect(0, 0, int(width), int(height))
+        rect.center = (cx, cy)
+        pygame.draw.ellipse(surface, with_alpha(glow, alpha), rect)
+
+
+def draw_neon_bar(surface, glow_surface, x, base_y, top_y, color, stem_width):
+    x = int(x)
+    base_y = int(base_y)
+    top_y = int(top_y)
+    bright = brighten(color, 0.18)
+    glow_width = max(stem_width + 8, stem_width * 4)
+    mid_width = max(stem_width + 4, stem_width * 2 + 1)
+
+    pygame.draw.line(glow_surface, with_alpha(color, 34), (x, base_y), (x, top_y), glow_width)
+    pygame.draw.line(glow_surface, with_alpha(bright, 72), (x, base_y), (x, top_y), mid_width)
+    pygame.draw.line(surface, bright, (x, base_y), (x, top_y), stem_width)
+
+    cap_width = max(10, stem_width * 5)
+    cap_height = max(6, int(cap_width * 0.62))
+    draw_glow_ellipse(
+        glow_surface,
+        color,
+        (x, top_y),
+        [
+            (cap_width + 20, cap_height + 14, 18),
+            (cap_width + 12, cap_height + 8, 44),
+            (cap_width + 4, cap_height + 2, 96),
+        ],
+    )
+
+    cap_rect = pygame.Rect(0, 0, cap_width, cap_height)
+    cap_rect.center = (x, top_y)
+    pygame.draw.ellipse(surface, bright, cap_rect)
+
+    highlight_rect = cap_rect.inflate(-max(2, stem_width), -max(2, stem_width // 2 + 1))
+    if highlight_rect.width > 0 and highlight_rect.height > 0:
+        pygame.draw.ellipse(surface, brighten(color, 0.42), highlight_rect)
+
+
 def ease_out_cubic(t):
     t = max(0.0, min(1.0, t))
     return 1.0 - (1.0 - t) ** 3
@@ -266,7 +334,7 @@ class AudioVisualizer:
         self.track_query = ""
         self.render_base_path = None
 
-        self.active_bars = 64
+        self.active_bars = 84
         self.heights = np.zeros(MAX_BARS)
         self.velocity = np.zeros(MAX_BARS)
 
@@ -895,21 +963,11 @@ class AudioVisualizer:
         pygame.draw.circle(self.screen, COLOR_TERMINAL_BORDER, (knob_x, prog_y + prog_h // 2), 4)
 
     def draw_track_label(self, w):
-        panel = self.terminal_dock_rect()
-        draw_terminal_panel(self.screen, panel)
-
-        header = self.font_hint.render("player", True, COLOR_TERMINAL_DIM)
-        self.screen.blit(header, (panel.x + 14, panel.y + 10))
-
-        title = trim_text(self.font_track, self.track_title or "", max(120, panel.w - 32))
+        title = trim_text(self.font_track, self.track_title or "", max(120, w - 40))
         if not title:
             return
-        label = self.font_track.render(f"> now-playing: {title}", True, COLOR_TERMINAL_TEXT)
-        self.screen.blit(label, (panel.x + 14, panel.y + 34))
-
-        if self.track_source_label:
-            source = self.font_hint.render(self.track_source_label.lower(), True, COLOR_TERMINAL_DIM)
-            self.screen.blit(source, (panel.x + 14, panel.y + 58))
+        label = self.font_track.render(title, True, COLOR_TERMINAL_TEXT)
+        self.screen.blit(label, (20, 18))
 
     def draw_playlist_overlay(self):
         overlay_rect = self.playlist_overlay_rect()
@@ -964,51 +1022,53 @@ class AudioVisualizer:
 
     def draw_loading_overlay(self):
         panel = self.terminal_dock_rect()
-        draw_terminal_panel(self.screen, panel)
-
         tick = (pygame.time.get_ticks() // 250) % 4
         pulse = "." * (tick + 1)
+        text_x = panel.x + 6
         title = self.font_hint.render("yt-loader", True, COLOR_TERMINAL_DIM)
-        self.screen.blit(title, (panel.x + 14, panel.y + 10))
+        self.screen.blit(title, (text_x, panel.y + 8))
 
-        line1 = self.font.render(f"> {self.loading_message or 'working'}{pulse}", True, COLOR_TERMINAL_TEXT)
-        line2 = self.font_hint.render("downloading -> decoding -> analyzing", True, COLOR_TERMINAL_DIM)
-        self.screen.blit(line1, (panel.x + 14, panel.y + 34))
-        self.screen.blit(line2, (panel.x + 14, panel.y + 58))
+        line1_text = trim_text(
+            self.font,
+            f"> {self.loading_message or 'working'}{pulse}",
+            panel.w - 12,
+        )
+        line2_text = trim_text(
+            self.font_hint,
+            "downloading -> decoding -> analyzing",
+            panel.w - 12,
+        )
+        line1 = self.font.render(line1_text, True, COLOR_TERMINAL_TEXT)
+        line2 = self.font_hint.render(line2_text, True, COLOR_TERMINAL_DIM)
+        self.screen.blit(line1, (text_x, panel.y + 30))
+        self.screen.blit(line2, (text_x, panel.y + 54))
 
     def draw_stream_prompt_overlay(self):
         rect = self.stream_prompt_rect()
-        panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
-        panel.fill((0, 0, 0, 0))
-        pygame.draw.rect(panel, (6, 10, 8, 235), (0, 0, rect.w, rect.h))
-        pygame.draw.rect(panel, COLOR_TERMINAL_BORDER, (0, 0, rect.w, rect.h), 1)
-
         prompt_label = self.font_hint.render("yt-search", True, COLOR_TERMINAL_DIM)
-        panel.blit(prompt_label, (14, 10))
+        self.screen.blit(prompt_label, (rect.x + 6, rect.y + 8))
 
-        prompt_x = 14
-        prompt_y = 36
+        prompt_x = rect.x + 6
+        prompt_y = rect.y + 30
         prompt_surface = self.font_prompt.render(">", True, COLOR_TERMINAL_BORDER)
-        panel.blit(prompt_surface, (prompt_x, prompt_y))
+        self.screen.blit(prompt_surface, (prompt_x, prompt_y))
 
         entry = self.stream_input or "paste link or type search"
         entry_color = COLOR_TERMINAL_TEXT if self.stream_input else COLOR_TERMINAL_DIM
         text_x = prompt_x + prompt_surface.get_width() + 12
-        rendered = trim_text(self.font_prompt, entry, rect.w - text_x - 16)
+        rendered = trim_text(self.font_prompt, entry, rect.w - (text_x - rect.x) - 6)
         entry_surface = self.font_prompt.render(rendered, True, entry_color)
-        panel.blit(entry_surface, (text_x, prompt_y))
+        self.screen.blit(entry_surface, (text_x, prompt_y))
 
         if self.stream_input and (pygame.time.get_ticks() // 500) % 2 == 0:
-            caret_x = min(rect.w - 16, text_x + entry_surface.get_width() + 2)
+            caret_x = min(rect.right - 8, text_x + entry_surface.get_width() + 2)
             pygame.draw.line(
-                panel,
+                self.screen,
                 COLOR_TERMINAL_TEXT,
                 (caret_x, prompt_y + 2),
                 (caret_x, prompt_y + self.font_prompt.get_height() - 2),
                 2,
             )
-
-        self.screen.blit(panel, rect.topleft)
 
     # ───────── DRAW ─────────
     def draw(self):
@@ -1022,6 +1082,7 @@ class AudioVisualizer:
             bar_area_x = 60
             bar_area_w = w - 120
             bar_w = bar_area_w / self.active_bars
+            stem_width = max(2, int(bar_w * 0.18))
 
             if self.rendering:
                 base_y = h - 40
@@ -1031,17 +1092,18 @@ class AudioVisualizer:
                 hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
 
             max_h = self.screen.get_height() * 0.72
+            glow_surface = pygame.Surface((w, h), pygame.SRCALPHA)
+
             for i in range(self.active_bars):
                 bh = self.heights[i]
                 if bh < 1:
                     continue
                 color = bar_color(i, self.active_bars, hue_shift)
-                pygame.draw.rect(
-                    self.screen,
-                    color,
-                    (bar_area_x + i * bar_w, base_y - bh, bar_w - BAR_GAP, bh),
-                    border_radius=2,
-                )
+                x = bar_area_x + i * bar_w + bar_w * 0.5
+                top_y = base_y - bh
+                draw_neon_bar(self.screen, glow_surface, x, base_y, top_y, color, stem_width)
+
+            self.screen.blit(glow_surface, (0, 0))
 
             if not self.rendering:
                 self.draw_controls(mx, my)
