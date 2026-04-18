@@ -5,7 +5,6 @@ import os
 import sys
 import threading
 import cv2
-import colorsys
 import math
 import shutil
 import subprocess
@@ -22,20 +21,20 @@ BAR_GAP = 1
 SPRING = 0.16
 DAMPING = 0.95
 
-COLOR_BG = (10, 10, 14)
-COLOR_BG_TOP = (12, 15, 26)
-COLOR_BG_BOTTOM = (8, 10, 16)
-COLOR_TEXT = (230, 230, 230)
-COLOR_TEXT_DIM = (120, 120, 120)
-COLOR_ACCENT = (255, 60, 120)
+COLOR_BG = (6, 10, 7)
+COLOR_BG_TOP = (6, 10, 7)
+COLOR_BG_BOTTOM = (6, 10, 7)
+COLOR_TEXT = (190, 255, 210)
+COLOR_TEXT_DIM = (98, 150, 113)
+COLOR_ACCENT = (102, 255, 153)
 COLOR_ACCENT_SOFT = (70, 185, 255)
-COLOR_CTRL = (50, 50, 60)
-COLOR_CTRL_HOVER = (80, 80, 95)
-COLOR_PANEL = (18, 22, 34)
-COLOR_PANEL_ALT = (24, 28, 42)
-COLOR_SUCCESS = (90, 220, 150)
-COLOR_WARNING = (255, 196, 100)
-COLOR_ERROR = (255, 110, 135)
+COLOR_CTRL = (17, 28, 19)
+COLOR_CTRL_HOVER = (22, 38, 26)
+COLOR_PANEL = (9, 14, 10)
+COLOR_PANEL_ALT = (13, 20, 14)
+COLOR_SUCCESS = (102, 255, 153)
+COLOR_WARNING = (255, 210, 120)
+COLOR_ERROR = (255, 120, 120)
 COLOR_TERMINAL_BG = (9, 13, 10)
 COLOR_TERMINAL_BORDER = (86, 214, 132)
 COLOR_TERMINAL_TEXT = (188, 255, 208)
@@ -48,18 +47,11 @@ STREAM_QUERY_PREFIX = "ytsearch1:"
 STATUS_TIMEOUT_SECONDS = 5.0
 
 BAR_GRAD = [
-    (0.78, 1.0, 0.95),
-    (0.62, 1.0, 1.00),
-    (0.50, 1.0, 1.00),
-    (0.38, 1.0, 1.00),
-    (0.10, 1.0, 1.00),
-    (0.96, 1.0, 0.95),
+    (50, 128, 72),
+    (64, 170, 93),
+    (86, 214, 132),
+    (132, 244, 170),
 ]
-
-def hsv(h, s=1.0, v=1.0):
-    r, g, b = colorsys.hsv_to_rgb(h % 1.0, s, v)
-    return int(r * 255), int(g * 255), int(b * 255)
-
 
 def lerp(a, b, t):
     t = max(0.0, min(1.0, t))
@@ -72,10 +64,11 @@ def bar_color(i, n, hue_shift=0.0):
     lo = BAR_GRAD[int(idx)]
     hi = BAR_GRAD[min(int(idx) + 1, len(BAR_GRAD) - 1)]
     frac = idx - int(idx)
-    h = lerp(lo[0], hi[0], frac) + hue_shift
-    s = lerp(lo[1], hi[1], frac)
-    v = lerp(lo[2], hi[2], frac)
-    return hsv(h, s, v)
+    return (
+        int(lerp(lo[0], hi[0], frac)),
+        int(lerp(lo[1], hi[1], frac)),
+        int(lerp(lo[2], hi[2], frac)),
+    )
 
 
 def ease_out_cubic(t):
@@ -131,6 +124,11 @@ def load_mono_font(size, bold=False):
     font = pygame.font.Font(font_path, size) if font_path else pygame.font.Font(None, size)
     font.set_bold(bold)
     return font
+
+
+def draw_terminal_panel(surface, rect, border_color=COLOR_TERMINAL_BORDER):
+    pygame.draw.rect(surface, COLOR_PANEL, rect)
+    pygame.draw.rect(surface, border_color, rect, 1)
 
 # ───────────────── VIDEO RENDERER ─────────────────
 class VideoRenderer:
@@ -246,11 +244,11 @@ class AudioVisualizer:
         self.clock = pygame.time.Clock()
         self.running = True
 
-        self.font = load_ui_font(18)
-        self.font_big = load_ui_font(36, bold=True)
-        self.font_hint = load_ui_font(14)
-        self.font_title = load_ui_font(48, bold=True)
-        self.font_track = load_ui_font(15)
+        self.font = load_mono_font(18)
+        self.font_big = load_mono_font(30, bold=True)
+        self.font_hint = load_mono_font(14)
+        self.font_title = load_mono_font(40, bold=True)
+        self.font_track = load_mono_font(15)
         self.font_prompt = load_mono_font(18)
 
         self.file = None
@@ -843,10 +841,20 @@ class AudioVisualizer:
         return
 
     def draw_empty_state(self, w, h):
-        title = self.font_title.render("Musializer", True, COLOR_TEXT)
-        subtitle = self.font.render("Drop audio or start with a stream source.", True, COLOR_TEXT_DIM)
-        self.screen.blit(title, (w // 2 - title.get_width() // 2, h // 2 - 42))
-        self.screen.blit(subtitle, (w // 2 - subtitle.get_width() // 2, h // 2 + 20))
+        panel = pygame.Rect(max(24, w // 2 - 280), max(24, h // 2 - 110), min(560, w - 48), 180)
+        draw_terminal_panel(self.screen, panel)
+
+        title = self.font_title.render("musializer", True, COLOR_TERMINAL_BORDER)
+        self.screen.blit(title, (panel.x + 18, panel.y + 18))
+
+        lines = [
+            "> drop audio file",
+            "> press u to search youtube",
+            "> left/right seek, space pause",
+        ]
+        for idx, line in enumerate(lines):
+            label = self.font.render(line, True, COLOR_TERMINAL_TEXT if idx == 0 else COLOR_TEXT_DIM)
+            self.screen.blit(label, (panel.x + 20, panel.y + 82 + idx * 28))
 
     def draw_header(self, w):
         return
@@ -858,45 +866,45 @@ class AudioVisualizer:
         prog_w = prog_hit.w
         prog_h = 2
 
-        pygame.draw.rect(self.screen, (42, 48, 66), (prog_x, prog_y, prog_w, prog_h), border_radius=2)
+        pygame.draw.rect(self.screen, COLOR_TERMINAL_DIM, (prog_x, prog_y, prog_w, prog_h))
 
         progress = self.current_time / self.duration if self.duration > 0 else 0
         fill = int(prog_w * progress)
         if fill > 0:
-            pygame.draw.rect(self.screen, COLOR_ACCENT, (prog_x, prog_y, fill, prog_h), border_radius=2)
+            pygame.draw.rect(self.screen, COLOR_TERMINAL_BORDER, (prog_x, prog_y, fill, prog_h))
 
         if prog_hit.collidepoint(mx, my):
             pygame.draw.rect(
                 self.screen,
-                (210, 210, 210),
+                COLOR_TERMINAL_TEXT,
                 (prog_x, prog_y - 2, prog_w, prog_h + 4),
                 1,
-                border_radius=3,
             )
 
         knob_x = prog_x + fill
         knob_x = max(prog_x, min(prog_x + prog_w, knob_x))
-        pygame.draw.circle(self.screen, COLOR_ACCENT, (knob_x, prog_y + prog_h // 2), 4)
+        pygame.draw.circle(self.screen, COLOR_TERMINAL_BORDER, (knob_x, prog_y + prog_h // 2), 4)
 
     def draw_track_label(self, w):
         title = trim_text(self.font_track, self.track_title or "", max(120, w - 40))
         if not title:
             return
-        label = self.font_track.render(title, True, COLOR_TEXT_DIM)
+        label = self.font_track.render(f"now-playing: {title}", True, COLOR_TERMINAL_TEXT)
         self.screen.blit(label, (20, 18))
 
     def draw_playlist_overlay(self):
         overlay_rect = self.playlist_overlay_rect()
         overlay = pygame.Surface((overlay_rect.w, overlay_rect.h), pygame.SRCALPHA)
-        overlay.fill((10, 12, 18, 228))
-        pygame.draw.rect(overlay, (50, 58, 82), (0, 0, overlay_rect.w, overlay_rect.h), 1, border_radius=18)
+        overlay.fill((0, 0, 0, 0))
+        pygame.draw.rect(overlay, (8, 12, 9, 238), (0, 0, overlay_rect.w, overlay_rect.h))
+        pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, (0, 0, overlay_rect.w, overlay_rect.h), 1)
 
-        title = self.font_big.render("Playlist", True, COLOR_TEXT)
+        title = self.font_big.render("[playlist]", True, COLOR_TERMINAL_BORDER)
         overlay.blit(title, (24, 18))
         help_text = self.font_hint.render(
-            "L / Esc close   Up / Down move   Enter or click to play",
+            "esc close | up/down move | enter/click play",
             True,
-            COLOR_TEXT_DIM,
+            COLOR_TERMINAL_DIM,
         )
         overlay.blit(help_text, (24, 64))
 
@@ -904,10 +912,11 @@ class AudioVisualizer:
         for idx in range(self.playlist_scroll, min(len(self.playlist), self.playlist_scroll + visible_lines)):
             row = pygame.Rect(18, 96 + (idx - self.playlist_scroll) * 36, overlay_rect.w - 36, 30)
             if idx == self.playlist_cursor:
-                pygame.draw.rect(overlay, (36, 42, 58), row, border_radius=10)
+                pygame.draw.rect(overlay, (18, 30, 20), row)
+                pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, row, 1)
             name = trim_text(self.font, os.path.basename(self.playlist[idx]), row.w - 24)
             prefix = "▶ " if idx == self.playlist_index else "   "
-            color = COLOR_ACCENT if idx == self.playlist_cursor else COLOR_TEXT
+            color = COLOR_TERMINAL_BORDER if idx == self.playlist_cursor else COLOR_TERMINAL_TEXT
             item = self.font.render(f"{prefix}{idx + 1:02d}. {name}", True, color)
             overlay.blit(item, (row.x + 10, row.y + 5))
 
@@ -925,37 +934,33 @@ class AudioVisualizer:
             "warning": COLOR_WARNING,
             "error": COLOR_ERROR,
         }
-        border = colors.get(self.status_level, COLOR_ACCENT_SOFT)
+        border = colors.get(self.status_level, COLOR_TERMINAL_BORDER)
         toast_y = 160 if self.spec is not None else self.screen.get_height() - 76
         toast = pygame.Rect(24, toast_y, min(self.screen.get_width() - 48, 560), 42)
-        pygame.draw.rect(self.screen, COLOR_PANEL_ALT, toast, border_radius=14)
-        pygame.draw.rect(self.screen, border, toast, 2, border_radius=14)
+        pygame.draw.rect(self.screen, COLOR_PANEL, toast)
+        pygame.draw.rect(self.screen, border, toast, 1)
         text = trim_text(self.font, self.status_message, toast.w - 24)
-        label = self.font.render(text, True, COLOR_TEXT)
+        label = self.font.render(text, True, border)
         self.screen.blit(label, (toast.x + 12, toast.y + 11))
 
     def draw_loading_overlay(self):
         w, h = self.screen.get_size()
         overlay = pygame.Surface((w, h), pygame.SRCALPHA)
-        overlay.fill((6, 8, 12, 165))
+        overlay.fill((4, 8, 5, 150))
 
-        panel = pygame.Rect(w // 2 - 220, h // 2 - 70, 440, 140)
-        pygame.draw.rect(overlay, COLOR_PANEL, panel, border_radius=24)
-        pygame.draw.rect(overlay, (64, 72, 96), panel, 1, border_radius=24)
+        panel = pygame.Rect(max(18, w // 2 - 250), max(18, h // 2 - 74), min(500, w - 36), 148)
+        pygame.draw.rect(overlay, COLOR_PANEL, panel)
+        pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, panel, 1)
 
-        center = (panel.x + 42, panel.y + 70)
-        ticks = pygame.time.get_ticks() / 180.0
-        for i in range(10):
-            angle = ticks + i * 0.55
-            alpha = 30 + i * 18
-            dot_x = center[0] + int(math.cos(angle) * 16)
-            dot_y = center[1] + int(math.sin(angle) * 16)
-            pygame.draw.circle(overlay, (255, 255, 255, alpha), (dot_x, dot_y), 4)
+        tick = (pygame.time.get_ticks() // 250) % 4
+        pulse = "." * (tick + 1)
+        title = self.font_big.render("[yt-loader]", True, COLOR_TERMINAL_BORDER)
+        overlay.blit(title, (panel.x + 18, panel.y + 22))
 
-        title = self.font_big.render("Loading source", True, COLOR_TEXT)
-        overlay.blit(title, (panel.x + 82, panel.y + 34))
-        detail = self.font.render(self.loading_message or "Please wait...", True, COLOR_TEXT_DIM)
-        overlay.blit(detail, (panel.x + 82, panel.y + 78))
+        line1 = self.font.render(f"> {self.loading_message or 'working'}{pulse}", True, COLOR_TERMINAL_TEXT)
+        line2 = self.font_hint.render("downloading -> decoding -> analyzing", True, COLOR_TERMINAL_DIM)
+        overlay.blit(line1, (panel.x + 20, panel.y + 74))
+        overlay.blit(line2, (panel.x + 20, panel.y + 108))
 
         self.screen.blit(overlay, (0, 0))
 
@@ -963,8 +968,8 @@ class AudioVisualizer:
         rect = self.stream_prompt_rect()
         panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
         panel.fill((0, 0, 0, 0))
-        pygame.draw.rect(panel, (6, 10, 8, 235), (0, 0, rect.w, rect.h), border_radius=10)
-        pygame.draw.rect(panel, COLOR_TERMINAL_BORDER, (0, 0, rect.w, rect.h), 1, border_radius=10)
+        pygame.draw.rect(panel, (6, 10, 8, 235), (0, 0, rect.w, rect.h))
+        pygame.draw.rect(panel, COLOR_TERMINAL_BORDER, (0, 0, rect.w, rect.h), 1)
 
         prompt_label = self.font_hint.render("yt-search", True, COLOR_TERMINAL_DIM)
         panel.blit(prompt_label, (14, 10))
