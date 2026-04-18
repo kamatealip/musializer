@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import cv2
+import colorsys
 import math
 import shutil
 import subprocess
@@ -22,8 +23,6 @@ SPRING = 0.16
 DAMPING = 0.95
 
 COLOR_BG = (6, 10, 7)
-COLOR_BG_TOP = (6, 10, 7)
-COLOR_BG_BOTTOM = (6, 10, 7)
 COLOR_TEXT = (190, 255, 210)
 COLOR_TEXT_DIM = (98, 150, 113)
 COLOR_ACCENT = (102, 255, 153)
@@ -47,11 +46,18 @@ STREAM_QUERY_PREFIX = "ytsearch1:"
 STATUS_TIMEOUT_SECONDS = 5.0
 
 BAR_GRAD = [
-    (50, 128, 72),
-    (64, 170, 93),
-    (86, 214, 132),
-    (132, 244, 170),
+    (0.78, 1.0, 0.95),
+    (0.62, 1.0, 1.00),
+    (0.50, 1.0, 1.00),
+    (0.38, 1.0, 1.00),
+    (0.10, 1.0, 1.00),
+    (0.96, 1.0, 0.95),
 ]
+
+
+def hsv(h, s=1.0, v=1.0):
+    r, g, b = colorsys.hsv_to_rgb(h % 1.0, s, v)
+    return int(r * 255), int(g * 255), int(b * 255)
 
 def lerp(a, b, t):
     t = max(0.0, min(1.0, t))
@@ -64,11 +70,10 @@ def bar_color(i, n, hue_shift=0.0):
     lo = BAR_GRAD[int(idx)]
     hi = BAR_GRAD[min(int(idx) + 1, len(BAR_GRAD) - 1)]
     frac = idx - int(idx)
-    return (
-        int(lerp(lo[0], hi[0], frac)),
-        int(lerp(lo[1], hi[1], frac)),
-        int(lerp(lo[2], hi[2], frac)),
-    )
+    h = lerp(lo[0], hi[0], frac) + hue_shift
+    s = lerp(lo[1], hi[1], frac)
+    v = lerp(lo[2], hi[2], frac)
+    return hsv(h, s, v)
 
 
 def ease_out_cubic(t):
@@ -339,11 +344,7 @@ class AudioVisualizer:
         return value
 
     def stream_prompt_rect(self):
-        w, h = self.screen.get_size()
-        width = min(720, max(320, w - 36))
-        width = min(width, max(220, w - 20))
-        height = 84
-        return pygame.Rect(18, h - height - 18, width, height)
+        return self.terminal_dock_rect()
 
     def open_stream_prompt(self, seed=""):
         if self.rendering:
@@ -748,10 +749,18 @@ class AudioVisualizer:
         margin = 24 if w >= 640 else 12
         return pygame.Rect(margin, h - 124 - margin, max(220, w - margin * 2), 124)
 
-    def progress_hit_rect(self):
+    def terminal_dock_rect(self):
         w, h = self.screen.get_size()
-        margin = 28 if w >= 640 else 16
-        return pygame.Rect(margin, h - 28, max(120, w - margin * 2), 12)
+        width = min(720, max(320, w - 36))
+        width = min(width, max(220, w - 20))
+        height = 84
+        return pygame.Rect(18, h - height - 18, width, height)
+
+    def progress_hit_rect(self):
+        dock = self.terminal_dock_rect()
+        margin = 28 if self.screen.get_width() >= 640 else 16
+        y = max(18, dock.y - 24)
+        return pygame.Rect(margin, y, max(120, self.screen.get_width() - margin * 2), 12)
 
     def playlist_overlay_rect(self):
         w, h = self.screen.get_size()
@@ -841,11 +850,11 @@ class AudioVisualizer:
         return
 
     def draw_empty_state(self, w, h):
-        panel = pygame.Rect(max(24, w // 2 - 280), max(24, h // 2 - 110), min(560, w - 48), 180)
+        panel = self.terminal_dock_rect()
         draw_terminal_panel(self.screen, panel)
 
-        title = self.font_title.render("musializer", True, COLOR_TERMINAL_BORDER)
-        self.screen.blit(title, (panel.x + 18, panel.y + 18))
+        title = self.font.render("musializer", True, COLOR_TERMINAL_BORDER)
+        self.screen.blit(title, (panel.x + 14, panel.y + 12))
 
         lines = [
             "> drop audio file",
@@ -854,7 +863,7 @@ class AudioVisualizer:
         ]
         for idx, line in enumerate(lines):
             label = self.font.render(line, True, COLOR_TERMINAL_TEXT if idx == 0 else COLOR_TEXT_DIM)
-            self.screen.blit(label, (panel.x + 20, panel.y + 82 + idx * 28))
+            self.screen.blit(label, (panel.x + 16, panel.y + 34 + idx * 16))
 
     def draw_header(self, w):
         return
@@ -886,11 +895,21 @@ class AudioVisualizer:
         pygame.draw.circle(self.screen, COLOR_TERMINAL_BORDER, (knob_x, prog_y + prog_h // 2), 4)
 
     def draw_track_label(self, w):
-        title = trim_text(self.font_track, self.track_title or "", max(120, w - 40))
+        panel = self.terminal_dock_rect()
+        draw_terminal_panel(self.screen, panel)
+
+        header = self.font_hint.render("player", True, COLOR_TERMINAL_DIM)
+        self.screen.blit(header, (panel.x + 14, panel.y + 10))
+
+        title = trim_text(self.font_track, self.track_title or "", max(120, panel.w - 32))
         if not title:
             return
-        label = self.font_track.render(f"now-playing: {title}", True, COLOR_TERMINAL_TEXT)
-        self.screen.blit(label, (20, 18))
+        label = self.font_track.render(f"> now-playing: {title}", True, COLOR_TERMINAL_TEXT)
+        self.screen.blit(label, (panel.x + 14, panel.y + 34))
+
+        if self.track_source_label:
+            source = self.font_hint.render(self.track_source_label.lower(), True, COLOR_TERMINAL_DIM)
+            self.screen.blit(source, (panel.x + 14, panel.y + 58))
 
     def draw_playlist_overlay(self):
         overlay_rect = self.playlist_overlay_rect()
@@ -935,7 +954,7 @@ class AudioVisualizer:
             "error": COLOR_ERROR,
         }
         border = colors.get(self.status_level, COLOR_TERMINAL_BORDER)
-        toast_y = 160 if self.spec is not None else self.screen.get_height() - 76
+        toast_y = max(18, self.terminal_dock_rect().y - 52)
         toast = pygame.Rect(24, toast_y, min(self.screen.get_width() - 48, 560), 42)
         pygame.draw.rect(self.screen, COLOR_PANEL, toast)
         pygame.draw.rect(self.screen, border, toast, 1)
@@ -944,25 +963,18 @@ class AudioVisualizer:
         self.screen.blit(label, (toast.x + 12, toast.y + 11))
 
     def draw_loading_overlay(self):
-        w, h = self.screen.get_size()
-        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
-        overlay.fill((4, 8, 5, 150))
-
-        panel = pygame.Rect(max(18, w // 2 - 250), max(18, h // 2 - 74), min(500, w - 36), 148)
-        pygame.draw.rect(overlay, COLOR_PANEL, panel)
-        pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, panel, 1)
+        panel = self.terminal_dock_rect()
+        draw_terminal_panel(self.screen, panel)
 
         tick = (pygame.time.get_ticks() // 250) % 4
         pulse = "." * (tick + 1)
-        title = self.font_big.render("[yt-loader]", True, COLOR_TERMINAL_BORDER)
-        overlay.blit(title, (panel.x + 18, panel.y + 22))
+        title = self.font_hint.render("yt-loader", True, COLOR_TERMINAL_DIM)
+        self.screen.blit(title, (panel.x + 14, panel.y + 10))
 
         line1 = self.font.render(f"> {self.loading_message or 'working'}{pulse}", True, COLOR_TERMINAL_TEXT)
         line2 = self.font_hint.render("downloading -> decoding -> analyzing", True, COLOR_TERMINAL_DIM)
-        overlay.blit(line1, (panel.x + 20, panel.y + 74))
-        overlay.blit(line2, (panel.x + 20, panel.y + 108))
-
-        self.screen.blit(overlay, (0, 0))
+        self.screen.blit(line1, (panel.x + 14, panel.y + 34))
+        self.screen.blit(line2, (panel.x + 14, panel.y + 58))
 
     def draw_stream_prompt_overlay(self):
         rect = self.stream_prompt_rect()
@@ -1007,9 +1019,6 @@ class AudioVisualizer:
         if self.spec is None:
             self.draw_empty_state(w, h)
         else:
-            if not self.rendering:
-                self.draw_track_label(w)
-
             bar_area_x = 60
             bar_area_w = w - 120
             bar_w = bar_area_w / self.active_bars
@@ -1036,6 +1045,8 @@ class AudioVisualizer:
 
             if not self.rendering:
                 self.draw_controls(mx, my)
+                if not self.show_stream_prompt and not self.loading:
+                    self.draw_track_label(w)
 
         if self.show_playlist and not self.rendering:
             self.draw_playlist_overlay()
