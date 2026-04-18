@@ -83,13 +83,11 @@ If `ffmpeg` is available, the renderer will automatically mux the original audio
 - Drop audio files onto the window to load them directly
 - Press `U` to paste a YouTube link or type a quick search query
 - Use the playlist view to select another track
-<<<<<<< HEAD
 - The rendered video file is saved next to the source audio with `_viz.mp4` appended
 
-## next ti implement 
+## next ti implement
+
 - youtube search
-- multi threading 
-=======
+- # multi threading
 - Local renders are saved next to the source audio with `_viz.mp4` appended
 - Stream renders are saved in the local `renders/` folder
->>>>>>> 8f6c8d8 (Refactor code structure for improved readability and maintainability)

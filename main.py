@@ -864,10 +864,12 @@ class AudioVisualizer:
         knob_x = max(prog_x, min(prog_x + prog_w, knob_x))
         pygame.draw.circle(self.screen, COLOR_ACCENT, (knob_x, prog_y + prog_h // 2), 4)
 
-        title = trim_text(self.font_track, self.track_title or "", prog_w)
-        if title:
-            label = self.font_track.render(title, True, COLOR_TEXT_DIM)
-            self.screen.blit(label, (prog_x, prog_hit.bottom + 10))
+    def draw_track_label(self, w):
+        title = trim_text(self.font_track, self.track_title or "", max(120, w - 40))
+        if not title:
+            return
+        label = self.font_track.render(title, True, COLOR_TEXT_DIM)
+        self.screen.blit(label, (20, 18))
 
     def draw_playlist_overlay(self):
         overlay_rect = self.playlist_overlay_rect()
@@ -986,6 +988,9 @@ class AudioVisualizer:
         if self.spec is None:
             self.draw_empty_state(w, h)
         else:
+            if not self.rendering:
+                self.draw_track_label(w)
+
             bar_area_x = 60
             bar_area_w = w - 120
             bar_w = bar_area_w / self.active_bars
