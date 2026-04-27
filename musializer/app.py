@@ -64,6 +64,7 @@ class AudioVisualizer:
 
         self.clock = pygame.time.Clock()
         self.running = True
+        self.last_visual_ticks = pygame.time.get_ticks()
 
         self.font = load_mono_font(18)
         self.font_big = load_mono_font(30, bold=True)
@@ -146,6 +147,9 @@ class AudioVisualizer:
         self.status_message = message
         self.status_level = level
         self.status_until = (pygame.time.get_ticks() / 1000.0) + seconds if seconds else 0.0
+
+    def reset_visual_timing(self):
+        self.last_visual_ticks = pygame.time.get_ticks()
 
     def refresh_play_button(self):
         if self.spec is None or self.loading or self.paused or self.playback_finished:
@@ -237,6 +241,7 @@ class AudioVisualizer:
         self.pause_time = t
         self.current_time = t
         self.playback_finished = False
+        self.reset_visual_timing()
         if self.paused:
             pygame.mixer.music.pause()
         self.refresh_play_button()
@@ -445,6 +450,7 @@ class AudioVisualizer:
         self.start_ticks = pygame.time.get_ticks()
         self.pause_time = 0.0
         self.current_time = 0.0
+        self.reset_visual_timing()
         self.paused = False
         self.playback_finished = False
         self.refresh_play_button()
@@ -580,17 +586,24 @@ class AudioVisualizer:
 
         data = self.spectrum_at(self.current_time)
         max_h = self.screen.get_height() * 0.60
+        now_ticks = pygame.time.get_ticks()
+        elapsed_ms = max(0, now_ticks - self.last_visual_ticks)
+        self.last_visual_ticks = now_ticks
+        nominal_ms = 1000.0 / FPS
+        # Catch the spring animation up when rendering makes the frame loop slower.
+        spring_steps = max(1, min(12, int(round(elapsed_ms / nominal_ms)) if elapsed_ms else 1))
 
         for i in range(self.active_bars):
             target = data[i] * max_h
-            diff = target - self.heights[i]
-            ratio = min(1.0, abs(diff) / max_h)
-            ease = ease_in_out(ratio)
-            spring_force = SPRING * (0.70 + 0.50 * ease)
-            self.velocity[i] = (self.velocity[i] + diff * spring_force) * DAMPING
-            if abs(self.velocity[i]) > abs(diff):
-                self.velocity[i] = math.copysign(abs(diff), self.velocity[i])
-            self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
+            for _ in range(spring_steps):
+                diff = target - self.heights[i]
+                ratio = min(1.0, abs(diff) / max_h) if max_h > 0 else 0.0
+                ease = ease_in_out(ratio)
+                spring_force = SPRING * (0.70 + 0.50 * ease)
+                self.velocity[i] = (self.velocity[i] + diff * spring_force) * DAMPING
+                if abs(self.velocity[i]) > abs(diff):
+                    self.velocity[i] = math.copysign(abs(diff), self.velocity[i])
+                self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
 
     def control_panel_rect(self):
         w, h = self.screen.get_size()
@@ -719,6 +732,7 @@ class AudioVisualizer:
         self.renderer = VideoRenderer(1920, 1080, FPS)
         self.renderer.start(out, self.duration, audio_source=self.file)
         self.rendering = True
+        self.reset_visual_timing()
         self.refresh_play_button()
         self.set_status(f"Rendering to {os.path.basename(out)}", "info", seconds=4.0)
 
