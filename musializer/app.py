@@ -1110,12 +1110,8 @@ class AudioVisualizer:
 
             if self.rendering:
                 base_y = h - 40
-                hue_shift = 0.0
-                color_phase = self.current_time * 1.35
             else:
                 base_y = self.progress_hit_rect().y - 20
-                color_phase = pygame.time.get_ticks() / 1000.0
-                hue_shift = color_phase * 0.03
 
             glow_surface = pygame.Surface((w, h), pygame.SRCALPHA)
 
@@ -1123,7 +1119,7 @@ class AudioVisualizer:
                 bh = self.heights[i]
                 if bh < 1:
                     continue
-                color = bar_color(i, self.active_bars, hue_shift, color_phase)
+                color = bar_color(i, self.active_bars)
                 x = bar_area_x + i * bar_w + bar_w * 0.5
                 top_y = base_y - bh
                 draw_neon_bar(self.screen, glow_surface, x, base_y, top_y, color, stem_width)
