@@ -13,14 +13,15 @@ import pygame
 
 from .constants import (
     BAR_GAP,
+    COLOR_ACCENT,
     COLOR_ACCENT_SOFT,
     COLOR_BG,
     COLOR_ERROR,
-    COLOR_PANEL,
     COLOR_SUCCESS,
     COLOR_TERMINAL_BORDER,
     COLOR_TERMINAL_DIM,
     COLOR_TERMINAL_TEXT,
+    COLOR_TEXT,
     COLOR_TEXT_DIM,
     COLOR_WARNING,
     DAMPING,
@@ -38,7 +39,7 @@ from .visuals import (
     bar_color,
     clean_filename,
     draw_neon_bar,
-    draw_terminal_panel,
+    draw_terminal_panel_box,
     ease_in_out,
     humanize_source,
     load_mono_font,
@@ -111,9 +112,13 @@ class AudioVisualizer:
         self.btn_prev = Button("◀◀  -10s", 0, 0, bw, bh, key_hint="← / A")
         self.btn_play = Button("▶  Play", 0, 0, bw, bh, key_hint="Space")
         self.btn_next = Button("▶▶  +10s", 0, 0, bw, bh, key_hint="→ / D")
-        self.btn_stream = Button("Open URL", 0, 0, 120, 38, key_hint="U")
+        self.btn_file = Button("Browse Files", 0, 0, 128, 38, key_hint="O")
+        self.btn_stream = Button("Find on YT", 0, 0, 120, 38, key_hint="F")
         self.btn_render = Button("Export MP4", 0, 0, 130, 38, key_hint="R")
         self.btn_playlist = Button("Playlist", 0, 0, 110, 38, key_hint="L")
+        self.action_buttons = []
+        self.transport_buttons = []
+        self.top_actions_left = None
 
         self.playlist_dir = None
         self.playlist = []
@@ -159,7 +164,10 @@ class AudioVisualizer:
         return value
 
     def stream_prompt_rect(self):
-        return self.terminal_dock_rect()
+        rect = self.terminal_dock_rect().copy()
+        rect.height = 118
+        rect.y -= 24
+        return rect
 
     def open_stream_prompt(self, seed=""):
         if self.rendering:
@@ -188,6 +196,36 @@ class AudioVisualizer:
             self.set_status("Clipboard is empty.", "warning")
             return
         self.stream_input += text
+
+    def open_file_picker(self):
+        if self.rendering or self.loading:
+            return
+
+        picker = None
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            picker = tk.Tk()
+            picker.withdraw()
+            picker.attributes("-topmost", True)
+            path = filedialog.askopenfilename(
+                title="Choose a track",
+                filetypes=[
+                    ("Audio and video", tuple(f"*{ext}" for ext in sorted(SUPPORTED_FORMATS))),
+                    ("All files", "*.*"),
+                ],
+                parent=picker,
+            )
+        except Exception as exc:
+            self.set_status(f"File picker is not available: {exc}", "warning", seconds=7.0)
+            return
+        finally:
+            if picker is not None:
+                picker.destroy()
+
+        if path:
+            self.load_playlist(os.path.dirname(path), start_file=path)
 
     def seek(self, t):
         if self.spec is None or self.loading:
@@ -411,7 +449,7 @@ class AudioVisualizer:
         self.playback_finished = False
         self.refresh_play_button()
 
-        print("[READY]  Space=Pause  U=Stream  ←/→=±10s  R=Render  L=Playlist  ESC=Exit")
+        print("[READY]  Space=Pause  F=YouTube  O=Files  ←/→=±10s  R=Render  L=Playlist  ESC=Exit")
         self.set_status(f"Now playing: {self.track_title}", "success", seconds=4.0)
 
     def get_supported_files(self, directory):
@@ -561,10 +599,10 @@ class AudioVisualizer:
 
     def terminal_dock_rect(self):
         w, h = self.screen.get_size()
-        width = min(720, max(320, w - 36))
+        width = min(840, max(320, w - 40))
         width = min(width, max(220, w - 20))
-        height = 84
-        return pygame.Rect(18, h - height - 18, width, height)
+        height = 92
+        return pygame.Rect((w - width) // 2, h - height - 22, width, height)
 
     def progress_hit_rect(self):
         dock = self.terminal_dock_rect()
@@ -579,8 +617,74 @@ class AudioVisualizer:
         overlay_h = max(220, min(h - 80, 520))
         return pygame.Rect((w - overlay_w) // 2, 40, overlay_w, overlay_h)
 
+    def hero_panel_rect(self):
+        w, h = self.screen.get_size()
+        width = min(980, max(340, w - 48))
+        height = min(430, max(280, h - 92))
+        height = min(height, h - 28)
+        return pygame.Rect((w - width) // 2, max(14, (h - height) // 2 - 12), width, height)
+
+    def source_card_rects(self):
+        panel = self.hero_panel_rect()
+        margin = 26
+        gap = 18
+        inner_w = panel.w - margin * 2
+
+        if inner_w >= 640:
+            card_h = 148
+            top = panel.bottom - margin - card_h
+            card_w = (inner_w - gap) // 2
+            left = pygame.Rect(panel.x + margin, top, card_w, card_h)
+            right = pygame.Rect(left.right + gap, top, card_w, card_h)
+            return left, right
+
+        card_h = 100
+        total_h = card_h * 2 + gap
+        top = panel.bottom - margin - total_h
+        first = pygame.Rect(panel.x + margin, top, inner_w, card_h)
+        second = pygame.Rect(panel.x + margin, first.bottom + gap, inner_w, card_h)
+        return first, second
+
     def layout_buttons(self, mx=None, my=None):
-        return
+        mx = -1 if mx is None else mx
+        my = -1 if my is None else my
+        self.action_buttons = []
+        self.transport_buttons = []
+        self.top_actions_left = None
+
+        if self.spec is not None and not self.rendering and not self.loading and not self.show_stream_prompt:
+            margin = 20
+            gap = 12 if self.screen.get_width() >= 920 else 8
+            buttons = [self.btn_file, self.btn_stream]
+            if self.playlist:
+                buttons.append(self.btn_playlist)
+            if self.spec is not None:
+                buttons.append(self.btn_render)
+
+            total_w = sum(button.rect.w for button in buttons) + gap * max(0, len(buttons) - 1)
+            x = self.screen.get_width() - margin - total_w
+            y = 20
+            for button in buttons:
+                button.update_pos(x, y)
+                button.check_hover(mx, my)
+                self.action_buttons.append(button)
+                x += button.rect.w + gap
+
+            if self.action_buttons:
+                self.top_actions_left = self.action_buttons[0].rect.x
+
+        if self.spec is not None and not self.loading and not self.show_stream_prompt:
+            dock = self.terminal_dock_rect()
+            gap = 12
+            buttons = [self.btn_prev, self.btn_play, self.btn_next]
+            total_w = sum(button.rect.w for button in buttons) + gap * (len(buttons) - 1)
+            x = dock.centerx - total_w // 2
+            y = dock.y + 16
+            for button in buttons:
+                button.update_pos(x, y)
+                button.check_hover(mx, my)
+                self.transport_buttons.append(button)
+                x += button.rect.w + gap
 
     def next_available_path(self, path):
         if not os.path.exists(path):
@@ -655,28 +759,135 @@ class AudioVisualizer:
 
     def draw_background(self, w, h):
         self.screen.fill(COLOR_BG)
+        atmosphere = pygame.Surface((w, h), pygame.SRCALPHA)
+        bloom = max(120, min(w, h) // 5)
+        pygame.draw.circle(
+            atmosphere,
+            (255, 96, 160, 28),
+            (int(w * 0.18), int(h * 0.18)),
+            bloom,
+        )
+        pygame.draw.circle(
+            atmosphere,
+            (255, 140, 186, 18),
+            (int(w * 0.82), int(h * 0.28)),
+            max(90, bloom // 2),
+        )
+        pygame.draw.ellipse(
+            atmosphere,
+            (255, 86, 150, 14),
+            pygame.Rect(int(w * 0.14), int(h * 0.58), int(w * 0.72), int(h * 0.28)),
+        )
+        self.screen.blit(atmosphere, (0, 0))
 
     def draw_top_actions(self):
-        return
+        for button in self.action_buttons:
+            button.draw(self.screen, self.font_hint, self.font_hint)
 
     def draw_empty_state(self, w, h):
-        panel = self.terminal_dock_rect()
-        draw_terminal_panel(self.screen, panel)
+        panel = self.hero_panel_rect()
+        draw_terminal_panel_box(
+            self.screen,
+            panel,
+            border_color=COLOR_TERMINAL_BORDER,
+            fill_color=(8, 4, 7, 228),
+            radius=26,
+            glow_alpha=30,
+        )
 
-        title = self.font.render("musializer", True, COLOR_TERMINAL_BORDER)
-        self.screen.blit(title, (panel.x + 14, panel.y + 12))
+        badge = self.font_hint.render("BAR VISUALIZER", True, COLOR_TERMINAL_BORDER)
+        self.screen.blit(badge, (panel.x + 28, panel.y + 28))
 
-        lines = [
-            "> drop audio file",
-            "> press u to search youtube",
-            "> left/right seek, space pause",
-        ]
-        for idx, line in enumerate(lines):
-            label = self.font.render(line, True, COLOR_TERMINAL_TEXT if idx == 0 else COLOR_TEXT_DIM)
-            self.screen.blit(label, (panel.x + 16, panel.y + 34 + idx * 16))
+        title = self.font_title.render("MUSIALIZER", True, COLOR_TEXT)
+        self.screen.blit(title, (panel.x + 26, panel.y + 50))
+
+        subtitle = self.font.render(
+            trim_text(
+                self.font,
+                "Pure black, rose bars, local files, and quick YouTube finding.",
+                panel.w - 56,
+            ),
+            True,
+            COLOR_TERMINAL_TEXT,
+        )
+        self.screen.blit(subtitle, (panel.x + 28, panel.y + 100))
+
+        help_line = self.font_hint.render(
+            trim_text(
+                self.font_hint,
+                "Drop a file anywhere, browse locally, or press F to find something on YouTube.",
+                panel.w - 56,
+            ),
+            True,
+            COLOR_TEXT_DIM,
+        )
+        self.screen.blit(help_line, (panel.x + 28, panel.y + 128))
+
+        local_card, stream_card = self.source_card_rects()
+        hover_local = local_card.collidepoint(pygame.mouse.get_pos())
+        hover_stream = stream_card.collidepoint(pygame.mouse.get_pos())
+
+        self.draw_source_card(
+            local_card,
+            "Local files",
+            "O",
+            [
+                "Click to browse for a track",
+                "or drop a file to load its folder as a playlist",
+            ],
+            hover_local,
+        )
+        self.draw_source_card(
+            stream_card,
+            "YouTube finder",
+            "F",
+            [
+                "Paste a link or type a search",
+                "and hit Enter to play the first result",
+            ],
+            hover_stream,
+        )
 
     def draw_header(self, w):
         return
+
+    def draw_source_card(self, rect, title, key_hint, lines, hovered):
+        border = COLOR_ACCENT_SOFT if hovered else COLOR_TERMINAL_BORDER
+        fill = (18, 8, 14, 242) if hovered else (12, 6, 10, 232)
+        draw_terminal_panel_box(
+            self.screen,
+            rect,
+            border_color=border,
+            fill_color=fill,
+            radius=20,
+            glow_alpha=34 if hovered else 20,
+        )
+
+        pill = pygame.Rect(rect.x + 16, rect.y + 14, 48, 24)
+        draw_terminal_panel_box(
+            self.screen,
+            pill,
+            border_color=border,
+            fill_color=(26, 9, 18, 255),
+            radius=12,
+            glow_alpha=0,
+        )
+        pill_text = self.font_hint.render(key_hint, True, COLOR_TEXT)
+        self.screen.blit(
+            pill_text,
+            (pill.centerx - pill_text.get_width() // 2, pill.y + 5),
+        )
+
+        title_font = self.font_big if rect.h >= 120 else self.font
+        title_surface = title_font.render(trim_text(title_font, title, rect.w - 32), True, COLOR_TEXT)
+        self.screen.blit(title_surface, (rect.x + 16, rect.y + 44))
+
+        max_lines = 2 if rect.h >= 120 else 1
+        line_y = rect.y + (84 if rect.h >= 120 else 74)
+        for idx, line in enumerate(lines[:max_lines]):
+            color = COLOR_TERMINAL_TEXT if idx == 0 else COLOR_TEXT_DIM
+            text = self.font_hint.render(trim_text(self.font_hint, line, rect.w - 32), True, color)
+            self.screen.blit(text, (rect.x + 16, line_y + idx * 18))
 
     def draw_controls(self, mx, my):
         prog_hit = self.progress_hit_rect()
@@ -705,20 +916,45 @@ class AudioVisualizer:
         pygame.draw.circle(self.screen, COLOR_TERMINAL_BORDER, (knob_x, prog_y + prog_h // 2), 4)
 
     def draw_track_label(self, w):
-        title = trim_text(self.font_track, self.track_title or "", max(120, w - 40))
+        available_right = self.top_actions_left - 20 if self.top_actions_left else w - 20
+        available_width = max(220, available_right - 20)
+        title = trim_text(self.font_track, self.track_title or "", max(120, available_width - 36))
         if not title:
             return
+        source = trim_text(self.font_hint, self.track_source_label or "", max(120, available_width - 36))
+        panel_w = max(220, min(available_width, max(260, self.font_track.size(title)[0] + 36)))
+        panel = pygame.Rect(20, 16, panel_w, 52 if source else 34)
+        draw_terminal_panel_box(
+            self.screen,
+            panel,
+            border_color=COLOR_TERMINAL_BORDER,
+            fill_color=(10, 5, 9, 220),
+            radius=16,
+            glow_alpha=12,
+        )
         label = self.font_track.render(title, True, COLOR_TERMINAL_TEXT)
-        self.screen.blit(label, (20, 18))
+        self.screen.blit(label, (panel.x + 14, panel.y + 10))
+        if source:
+            source_label = self.font_hint.render(source, True, COLOR_TEXT_DIM)
+            self.screen.blit(source_label, (panel.x + 14, panel.y + 30))
+
+    def draw_transport_controls(self):
+        for button in self.transport_buttons:
+            button.draw(self.screen, self.font, self.font_hint)
 
     def draw_playlist_overlay(self):
         overlay_rect = self.playlist_overlay_rect()
         overlay = pygame.Surface((overlay_rect.w, overlay_rect.h), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 0))
-        pygame.draw.rect(overlay, (8, 12, 9, 238), (0, 0, overlay_rect.w, overlay_rect.h))
-        pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, (0, 0, overlay_rect.w, overlay_rect.h), 1)
+        draw_terminal_panel_box(
+            overlay,
+            overlay.get_rect(),
+            border_color=COLOR_TERMINAL_BORDER,
+            fill_color=(8, 4, 7, 240),
+            radius=24,
+            glow_alpha=0,
+        )
 
-        title = self.font_big.render("[playlist]", True, COLOR_TERMINAL_BORDER)
+        title = self.font_big.render("playlist", True, COLOR_TERMINAL_BORDER)
         overlay.blit(title, (24, 18))
         help_text = self.font_hint.render(
             "esc close | up/down move | enter/click play",
@@ -731,8 +967,8 @@ class AudioVisualizer:
         for idx in range(self.playlist_scroll, min(len(self.playlist), self.playlist_scroll + visible_lines)):
             row = pygame.Rect(18, 96 + (idx - self.playlist_scroll) * 36, overlay_rect.w - 36, 30)
             if idx == self.playlist_cursor:
-                pygame.draw.rect(overlay, (18, 30, 20), row)
-                pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, row, 1)
+                pygame.draw.rect(overlay, (28, 10, 20, 210), row, border_radius=10)
+                pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, row, 1, border_radius=10)
             name = trim_text(self.font, os.path.basename(self.playlist[idx]), row.w - 24)
             prefix = "▶ " if idx == self.playlist_index else "   "
             color = COLOR_TERMINAL_BORDER if idx == self.playlist_cursor else COLOR_TERMINAL_TEXT
@@ -756,8 +992,14 @@ class AudioVisualizer:
         border = colors.get(self.status_level, COLOR_TERMINAL_BORDER)
         toast_y = max(18, self.terminal_dock_rect().y - 52)
         toast = pygame.Rect(24, toast_y, min(self.screen.get_width() - 48, 560), 42)
-        pygame.draw.rect(self.screen, COLOR_PANEL, toast)
-        pygame.draw.rect(self.screen, border, toast, 1)
+        draw_terminal_panel_box(
+            self.screen,
+            toast,
+            border_color=border,
+            fill_color=(10, 5, 9, 230),
+            radius=14,
+            glow_alpha=14,
+        )
         text = trim_text(self.font, self.status_message, toast.w - 24)
         label = self.font.render(text, True, border)
         self.screen.blit(label, (toast.x + 12, toast.y + 11))
@@ -766,44 +1008,82 @@ class AudioVisualizer:
         panel = self.terminal_dock_rect()
         tick = (pygame.time.get_ticks() // 250) % 4
         pulse = "." * (tick + 1)
-        text_x = panel.x + 6
-        title = self.font_hint.render("yt-loader", True, COLOR_TERMINAL_DIM)
-        self.screen.blit(title, (text_x, panel.y + 8))
+        draw_terminal_panel_box(
+            self.screen,
+            panel,
+            border_color=COLOR_TERMINAL_BORDER,
+            fill_color=(9, 4, 8, 232),
+            radius=20,
+            glow_alpha=18,
+        )
+        text_x = panel.x + 18
+        title = self.font_hint.render("loading source", True, COLOR_TERMINAL_DIM)
+        self.screen.blit(title, (text_x, panel.y + 12))
 
         line1_text = trim_text(
             self.font,
             f"> {self.loading_message or 'working'}{pulse}",
-            panel.w - 12,
+            panel.w - 36,
         )
         line2_text = trim_text(
             self.font_hint,
             "downloading -> decoding -> analyzing",
-            panel.w - 12,
+            panel.w - 36,
         )
         line1 = self.font.render(line1_text, True, COLOR_TERMINAL_TEXT)
         line2 = self.font_hint.render(line2_text, True, COLOR_TERMINAL_DIM)
-        self.screen.blit(line1, (text_x, panel.y + 30))
-        self.screen.blit(line2, (text_x, panel.y + 54))
+        self.screen.blit(line1, (text_x, panel.y + 36))
+        self.screen.blit(line2, (text_x, panel.y + 60))
 
     def draw_stream_prompt_overlay(self):
         rect = self.stream_prompt_rect()
-        prompt_label = self.font_hint.render("yt-search", True, COLOR_TERMINAL_DIM)
-        self.screen.blit(prompt_label, (rect.x + 6, rect.y + 8))
+        draw_terminal_panel_box(
+            self.screen,
+            rect,
+            border_color=COLOR_ACCENT,
+            fill_color=(9, 4, 8, 242),
+            radius=22,
+            glow_alpha=24,
+        )
 
-        prompt_x = rect.x + 6
-        prompt_y = rect.y + 30
+        prompt_label = self.font_hint.render("YOUTUBE FINDER", True, COLOR_TERMINAL_DIM)
+        self.screen.blit(prompt_label, (rect.x + 18, rect.y + 12))
+
+        helper = self.font_hint.render(
+            trim_text(
+                self.font_hint,
+                "F to open | enter plays first result | ctrl+v paste | esc close",
+                rect.w - 36,
+            ),
+            True,
+            COLOR_TEXT_DIM,
+        )
+        self.screen.blit(helper, (rect.x + 18, rect.y + 32))
+
+        input_box = pygame.Rect(rect.x + 16, rect.y + 56, rect.w - 32, 42)
+        draw_terminal_panel_box(
+            self.screen,
+            input_box,
+            border_color=COLOR_TERMINAL_BORDER,
+            fill_color=(16, 6, 12, 255),
+            radius=14,
+            glow_alpha=0,
+        )
+
+        prompt_x = input_box.x + 14
+        prompt_y = input_box.y + 9
         prompt_surface = self.font_prompt.render(">", True, COLOR_TERMINAL_BORDER)
         self.screen.blit(prompt_surface, (prompt_x, prompt_y))
 
-        entry = self.stream_input or "paste link or type search"
+        entry = self.stream_input or "paste link or type a search"
         entry_color = COLOR_TERMINAL_TEXT if self.stream_input else COLOR_TERMINAL_DIM
         text_x = prompt_x + prompt_surface.get_width() + 12
-        rendered = trim_text(self.font_prompt, entry, rect.w - (text_x - rect.x) - 6)
+        rendered = trim_text(self.font_prompt, entry, input_box.w - (text_x - input_box.x) - 14)
         entry_surface = self.font_prompt.render(rendered, True, entry_color)
         self.screen.blit(entry_surface, (text_x, prompt_y))
 
         if self.stream_input and (pygame.time.get_ticks() // 500) % 2 == 0:
-            caret_x = min(rect.right - 8, text_x + entry_surface.get_width() + 2)
+            caret_x = min(input_box.right - 12, text_x + entry_surface.get_width() + 2)
             pygame.draw.line(
                 self.screen,
                 COLOR_TERMINAL_TEXT,
@@ -816,6 +1096,7 @@ class AudioVisualizer:
         w, h = self.screen.get_size()
         mx, my = pygame.mouse.get_pos()
         self.draw_background(w, h)
+        self.layout_buttons(mx, my)
 
         if self.spec is None:
             self.draw_empty_state(w, h)
@@ -823,14 +1104,18 @@ class AudioVisualizer:
             bar_area_x = 60
             bar_area_w = w - 120
             bar_w = bar_area_w / self.active_bars
-            stem_width = max(2, int(bar_w * 0.18))
+            target_width = max(3, int(bar_w * 0.72))
+            max_width = max(1, int(bar_w - max(1, BAR_GAP)))
+            stem_width = min(target_width, max_width)
 
             if self.rendering:
                 base_y = h - 40
                 hue_shift = 0.0
+                color_phase = self.current_time * 1.35
             else:
                 base_y = self.progress_hit_rect().y - 20
-                hue_shift = (pygame.time.get_ticks() / 1000.0) * 0.06
+                color_phase = pygame.time.get_ticks() / 1000.0
+                hue_shift = color_phase * 0.03
 
             glow_surface = pygame.Surface((w, h), pygame.SRCALPHA)
 
@@ -838,7 +1123,7 @@ class AudioVisualizer:
                 bh = self.heights[i]
                 if bh < 1:
                     continue
-                color = bar_color(i, self.active_bars, hue_shift)
+                color = bar_color(i, self.active_bars, hue_shift, color_phase)
                 x = bar_area_x + i * bar_w + bar_w * 0.5
                 top_y = base_y - bh
                 draw_neon_bar(self.screen, glow_surface, x, base_y, top_y, color, stem_width)
@@ -846,9 +1131,11 @@ class AudioVisualizer:
             self.screen.blit(glow_surface, (0, 0))
 
             if not self.rendering:
+                self.draw_top_actions()
                 self.draw_controls(mx, my)
                 if not self.show_stream_prompt and not self.loading:
                     self.draw_track_label(w)
+                    self.draw_transport_controls()
 
         if self.show_playlist and not self.rendering:
             self.draw_playlist_overlay()
@@ -867,7 +1154,7 @@ class AudioVisualizer:
             self.renderer.write(self.screen)
 
     def run(self):
-        print("MUSIALIZER READY — drop audio/video, press U for YouTube/search, press L for playlists.")
+        print("MUSIALIZER READY — drop audio/video, press F for YouTube find, O for files, L for playlists.")
 
         while self.running:
             for event in pygame.event.get():
@@ -901,8 +1188,10 @@ class AudioVisualizer:
 
                     if event.key == pygame.K_ESCAPE:
                         self.running = False
-                    elif event.key == pygame.K_u:
+                    elif event.key in (pygame.K_f, pygame.K_u):
                         self.open_stream_prompt()
+                    elif event.key == pygame.K_o:
+                        self.open_file_picker()
                     elif event.key == pygame.K_l and self.playlist:
                         self.toggle_playlist()
                     elif event.key == pygame.K_SPACE:
@@ -936,6 +1225,45 @@ class AudioVisualizer:
                                     self.select_playlist_item()
                                     break
                         continue
+
+                    if self.spec is None:
+                        local_card, stream_card = self.source_card_rects()
+                        if local_card.collidepoint(event.pos):
+                            self.open_file_picker()
+                            continue
+                        if stream_card.collidepoint(event.pos):
+                            self.open_stream_prompt()
+                            continue
+
+                    if self.spec is not None and not self.rendering:
+                        clicked = False
+                        for button in self.action_buttons:
+                            if button.is_clicked(event):
+                                clicked = True
+                                if button is self.btn_file:
+                                    self.open_file_picker()
+                                elif button is self.btn_stream:
+                                    self.open_stream_prompt()
+                                elif button is self.btn_playlist and self.playlist:
+                                    self.toggle_playlist()
+                                elif button is self.btn_render and self.spec is not None:
+                                    self.start_render()
+                                break
+                        if clicked:
+                            continue
+
+                        for button in self.transport_buttons:
+                            if button.is_clicked(event):
+                                if button is self.btn_prev:
+                                    self.skip(-SKIP_SECONDS)
+                                elif button is self.btn_play:
+                                    self.toggle_pause()
+                                elif button is self.btn_next:
+                                    self.skip(SKIP_SECONDS)
+                                clicked = True
+                                break
+                        if clicked:
+                            continue
 
                     if self.spec is not None and self.progress_hit_rect().collidepoint(event.pos):
                         ratio = (event.pos[0] - self.progress_hit_rect().x) / self.progress_hit_rect().w

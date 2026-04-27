@@ -67,7 +67,8 @@ If no folder is provided, the script uses the local `music/` folder.
 - `SPACE` — Play / Pause
 - `←` / `A` — Seek backward 10 seconds
 - `→` / `D` — Seek forward 10 seconds
-- `U` — Open the online stream/search prompt
+- `F` — Open the YouTube find/search prompt
+- `O` — Open a local file picker
 - `L` — Open playlist
 - `R` — Start render mode
 - `ESC` — Exit
@@ -81,7 +82,8 @@ If `ffmpeg` is available, the renderer will automatically mux the original audio
 ## Tips
 
 - Drop audio files onto the window to load them directly
-- Press `U` to paste a YouTube link or type a quick search query
+- Press `F` to paste a YouTube link or type a quick search query
+- Press `O` to browse for a local track
 - Use the playlist view to select another track
 - The rendered video file is saved next to the source audio with `_viz.mp4` appended
 

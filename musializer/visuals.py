@@ -1,9 +1,10 @@
 import colorsys
+import math
 import re
 
 import pygame
 
-from .constants import BAR_GRAD, COLOR_PANEL, COLOR_TERMINAL_BORDER
+from .constants import BAR_GRAD, COLOR_TERMINAL_BORDER
 
 
 def hsv(h, s=1.0, v=1.0):
@@ -16,15 +17,30 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
-def bar_color(i, n, hue_shift=0.0):
+def clamp01(value):
+    return max(0.0, min(1.0, value))
+
+
+def bar_color(i, n, hue_shift=0.0, time_phase=0.0):
     t = i / max(n - 1, 1)
     idx = t * (len(BAR_GRAD) - 1)
     lo = BAR_GRAD[int(idx)]
     hi = BAR_GRAD[min(int(idx) + 1, len(BAR_GRAD) - 1)]
     frac = idx - int(idx)
-    h = lerp(lo[0], hi[0], frac) + hue_shift
-    s = lerp(lo[1], hi[1], frac)
-    v = lerp(lo[2], hi[2], frac)
+    base_h = lerp(lo[0], hi[0], frac)
+    base_s = lerp(lo[1], hi[1], frac)
+    base_v = lerp(lo[2], hi[2], frac)
+
+    # Create a subtle animated gradient wave that moves across the whole bar field.
+    wave_primary = math.sin(time_phase * 1.15 + t * math.tau * 1.55)
+    wave_secondary = math.sin(time_phase * 0.72 - t * math.tau * 2.25 + 0.9)
+    hue_wave = wave_primary * 0.014 + wave_secondary * 0.008
+    saturation_wave = wave_secondary * 0.045 + wave_primary * 0.02
+    value_wave = wave_primary * 0.06 + wave_secondary * 0.025
+
+    h = base_h + hue_shift + hue_wave
+    s = clamp01(base_s + saturation_wave)
+    v = clamp01(base_v + value_wave)
     return hsv(h, s, v)
 
 
@@ -36,49 +52,53 @@ def with_alpha(color, alpha):
     return (color[0], color[1], color[2], alpha)
 
 
-def draw_glow_ellipse(surface, color, center, sizes_and_alpha):
-    glow = brighten(color, 0.35)
-    cx, cy = int(center[0]), int(center[1])
-    for width, height, alpha in sizes_and_alpha:
-        if width <= 0 or height <= 0 or alpha <= 0:
-            continue
-        rect = pygame.Rect(0, 0, int(width), int(height))
-        rect.center = (cx, cy)
-        pygame.draw.ellipse(surface, with_alpha(glow, alpha), rect)
-
-
 def draw_neon_bar(surface, glow_surface, x, base_y, top_y, color, stem_width):
     x = int(x)
     base_y = int(base_y)
     top_y = int(top_y)
-    bright = brighten(color, 0.18)
-    glow_width = max(stem_width + 8, stem_width * 4)
-    mid_width = max(stem_width + 4, stem_width * 2 + 1)
+    bar_width = max(2, int(stem_width))
+    bar_height = max(4, base_y - top_y)
+    radius = min(10, max(1, bar_width // 2 + 1))
+    left = x - bar_width // 2
+    rect = pygame.Rect(left, base_y - bar_height, bar_width, bar_height)
 
-    pygame.draw.line(glow_surface, with_alpha(color, 34), (x, base_y), (x, top_y), glow_width)
-    pygame.draw.line(glow_surface, with_alpha(bright, 72), (x, base_y), (x, top_y), mid_width)
-    pygame.draw.line(surface, bright, (x, base_y), (x, top_y), stem_width)
+    bright = brighten(color, 0.32)
+    hottest = brighten(color, 0.58)
 
-    cap_width = max(10, stem_width * 5)
-    cap_height = max(6, int(cap_width * 0.62))
-    draw_glow_ellipse(
-        glow_surface,
-        color,
-        (x, top_y),
-        [
-            (cap_width + 20, cap_height + 14, 18),
-            (cap_width + 12, cap_height + 8, 44),
-            (cap_width + 4, cap_height + 2, 96),
-        ],
+    for inflate_x, inflate_y, alpha in ((26, 18, 18), (16, 10, 38), (8, 4, 76)):
+        glow_rect = rect.inflate(inflate_x, inflate_y)
+        pygame.draw.rect(
+            glow_surface,
+            with_alpha(bright, alpha),
+            glow_rect,
+            border_radius=max(radius, radius + inflate_x // 6),
+        )
+
+    pygame.draw.rect(surface, color, rect, border_radius=radius)
+
+    inner_rect = rect.inflate(-max(2, bar_width // 3), -max(2, bar_width // 4))
+    if inner_rect.width > 0 and inner_rect.height > 0:
+        pygame.draw.rect(
+            surface,
+            bright,
+            inner_rect,
+            border_radius=max(2, radius - 1),
+        )
+
+    highlight_width = max(1, bar_width // 4)
+    highlight_x = rect.x + 1 if rect.w > 3 else rect.x
+    highlight_rect = pygame.Rect(
+        highlight_x,
+        rect.y + 1,
+        max(1, min(highlight_width, rect.right - highlight_x)),
+        max(1, rect.h - 2),
     )
-
-    cap_rect = pygame.Rect(0, 0, cap_width, cap_height)
-    cap_rect.center = (x, top_y)
-    pygame.draw.ellipse(surface, bright, cap_rect)
-
-    highlight_rect = cap_rect.inflate(-max(2, stem_width), -max(2, stem_width // 2 + 1))
-    if highlight_rect.width > 0 and highlight_rect.height > 0:
-        pygame.draw.ellipse(surface, brighten(color, 0.42), highlight_rect)
+    pygame.draw.rect(
+        surface,
+        hottest,
+        highlight_rect,
+        border_radius=max(2, radius - 2),
+    )
 
 
 def ease_in_out(t):
@@ -124,5 +144,42 @@ def load_mono_font(size, bold=False):
 
 
 def draw_terminal_panel(surface, rect, border_color=COLOR_TERMINAL_BORDER):
-    pygame.draw.rect(surface, COLOR_PANEL, rect)
-    pygame.draw.rect(surface, border_color, rect, 1)
+    draw_terminal_panel_box(surface, rect, border_color=border_color)
+
+
+def draw_terminal_panel_box(
+    surface,
+    rect,
+    border_color=COLOR_TERMINAL_BORDER,
+    fill_color=(8, 4, 7, 232),
+    radius=18,
+    glow_alpha=26,
+):
+    if glow_alpha > 0:
+        glow = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        for pad, alpha in ((18, glow_alpha // 2), (10, glow_alpha), (4, glow_alpha + 10)):
+            glow_rect = rect.inflate(pad * 2, pad * 2)
+            pygame.draw.rect(
+                glow,
+                with_alpha(border_color, alpha),
+                glow_rect,
+                1,
+                border_radius=radius + pad,
+            )
+        surface.blit(glow, (0, 0))
+
+    panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    panel_rect = panel.get_rect()
+    pygame.draw.rect(panel, fill_color, panel_rect, border_radius=radius)
+    pygame.draw.rect(panel, with_alpha(border_color, 150), panel_rect, 1, border_radius=radius)
+
+    highlight = pygame.Rect(1, 1, max(0, rect.w - 2), max(14, rect.h // 5))
+    if highlight.width > 0 and highlight.height > 0:
+        pygame.draw.rect(
+            panel,
+            with_alpha(border_color, 22),
+            highlight,
+            border_radius=max(6, radius - 4),
+        )
+
+    surface.blit(panel, rect.topleft)
