@@ -1,12 +1,23 @@
+import colorsys
 import re
 
 import pygame
 
-from .constants import COLOR_TERMINAL_BORDER
+from .constants import BAR_GRAD, COLOR_TERMINAL_BORDER
 
 
 def bar_color(i, n, hue_shift=0.0, time_phase=0.0):
-    return COLOR_TERMINAL_BORDER
+    del hue_shift, time_phase
+    t = i / max(n - 1, 1)
+    idx = t * (len(BAR_GRAD) - 1)
+    lo = BAR_GRAD[int(idx)]
+    hi = BAR_GRAD[min(int(idx) + 1, len(BAR_GRAD) - 1)]
+    frac = idx - int(idx)
+    hue = lo[0] + (hi[0] - lo[0]) * frac
+    sat = lo[1] + (hi[1] - lo[1]) * frac
+    val = lo[2] + (hi[2] - lo[2]) * frac
+    red, green, blue = colorsys.hsv_to_rgb(hue % 1.0, sat, val)
+    return int(red * 255), int(green * 255), int(blue * 255)
 
 
 def with_alpha(color, alpha):
@@ -80,10 +91,16 @@ def draw_terminal_panel_box(
     radius=18,
     glow_alpha=26,
 ):
+    clipped_rect = pygame.Rect(rect).clip(surface.get_rect())
+    if clipped_rect.width <= 0 or clipped_rect.height <= 0:
+        return
+
     if glow_alpha > 0:
         glow = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
         for pad, alpha in ((18, glow_alpha // 2), (10, glow_alpha), (4, glow_alpha + 10)):
-            glow_rect = rect.inflate(pad * 2, pad * 2)
+            glow_rect = clipped_rect.inflate(pad * 2, pad * 2).clip(surface.get_rect())
+            if glow_rect.width <= 0 or glow_rect.height <= 0:
+                continue
             pygame.draw.rect(
                 glow,
                 with_alpha(border_color, alpha),
@@ -93,12 +110,22 @@ def draw_terminal_panel_box(
             )
         surface.blit(glow, (0, 0))
 
-    panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    panel = pygame.Surface((clipped_rect.w, clipped_rect.h), pygame.SRCALPHA)
     panel_rect = panel.get_rect()
     pygame.draw.rect(panel, fill_color, panel_rect, border_radius=radius)
-    pygame.draw.rect(panel, with_alpha(border_color, 150), panel_rect, 1, border_radius=radius)
 
-    highlight = pygame.Rect(1, 1, max(0, rect.w - 2), max(14, rect.h // 5))
+    border_rect = panel_rect.inflate(-2, -2)
+    if border_rect.width <= 0 or border_rect.height <= 0:
+        border_rect = panel_rect.copy()
+    pygame.draw.rect(
+        panel,
+        with_alpha(border_color, 150),
+        border_rect,
+        1,
+        border_radius=max(1, min(radius, border_rect.width // 2, border_rect.height // 2)),
+    )
+
+    highlight = pygame.Rect(2, 2, max(0, clipped_rect.w - 4), max(14, clipped_rect.h // 5))
     if highlight.width > 0 and highlight.height > 0:
         pygame.draw.rect(
             panel,
@@ -107,4 +134,4 @@ def draw_terminal_panel_box(
             border_radius=max(6, radius - 4),
         )
 
-    surface.blit(panel, rect.topleft)
+    surface.blit(panel, clipped_rect.topleft)
