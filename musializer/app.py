@@ -24,15 +24,18 @@ from .constants import (
     COLOR_TEXT,
     COLOR_TEXT_DIM,
     COLOR_WARNING,
-    DAMPING,
     FPS,
     MAX_BARS,
     SKIP_SECONDS,
-    SPRING,
     STATUS_TIMEOUT_SECONDS,
     STREAM_CACHE_DIR,
     STREAM_QUERY_PREFIX,
     SUPPORTED_FORMATS,
+    VISUAL_ATTACK_SECONDS,
+    VISUAL_GAIN,
+    VISUAL_LOOKAHEAD_SECONDS,
+    VISUAL_RELEASE_SECONDS,
+    VISUAL_RESPONSE_POWER,
 )
 from .rendering import VideoRenderer
 from .visuals import (
@@ -40,7 +43,6 @@ from .visuals import (
     clean_filename,
     draw_neon_bar,
     draw_terminal_panel_box,
-    ease_in_out,
     humanize_source,
     load_mono_font,
     trim_text,
@@ -85,7 +87,6 @@ class AudioVisualizer:
 
         self.active_bars = 84
         self.heights = np.zeros(MAX_BARS)
-        self.velocity = np.zeros(MAX_BARS)
 
         self.start_ticks = 0
         self.pause_time = 0.0
@@ -442,7 +443,6 @@ class AudioVisualizer:
         self.render_base_path = payload["render_base_path"]
 
         self.heights.fill(0)
-        self.velocity.fill(0)
 
         pygame.mixer.music.load(self.file)
         pygame.mixer.music.play()
@@ -519,10 +519,18 @@ class AudioVisualizer:
         self.start_load(self.playlist[self.playlist_index], source_mode="local")
 
     def spectrum_at(self, t):
-        idx = np.searchsorted(self.times, t)
-        idx = min(idx, len(self.times) - 1)
-        frame = self.spec[:, idx]
-        frame = np.clip((frame + 80) / 80, 0, 1) ** 0.65
+        if len(self.times) <= 1:
+            frame = self.spec[:, 0]
+        else:
+            idx = int(np.searchsorted(self.times, t, side="right"))
+            hi_idx = min(max(idx, 1), len(self.times) - 1)
+            lo_idx = hi_idx - 1
+            lo_t = self.times[lo_idx]
+            hi_t = self.times[hi_idx]
+            mix = 0.0 if hi_t <= lo_t else (t - lo_t) / (hi_t - lo_t)
+            mix = max(0.0, min(1.0, mix))
+            frame = self.spec[:, lo_idx] * (1.0 - mix) + self.spec[:, hi_idx] * mix
+        frame = np.clip(((frame + 80) / 80) ** VISUAL_RESPONSE_POWER * VISUAL_GAIN, 0, 1)
         return frame[:self.active_bars]
 
     def update(self):
@@ -584,26 +592,24 @@ class AudioVisualizer:
                 self.render_progress_length = len(msg)
                 self.last_render_log = now_ms
 
-        data = self.spectrum_at(self.current_time)
+        visual_time = min(self.duration, self.current_time + VISUAL_LOOKAHEAD_SECONDS)
+        data = self.spectrum_at(visual_time)
         max_h = self.screen.get_height() * 0.60
         now_ticks = pygame.time.get_ticks()
         elapsed_ms = max(0, now_ticks - self.last_visual_ticks)
         self.last_visual_ticks = now_ticks
         nominal_ms = 1000.0 / FPS
-        # Catch the spring animation up when rendering makes the frame loop slower.
-        spring_steps = max(1, min(12, int(round(elapsed_ms / nominal_ms)) if elapsed_ms else 1))
+        # Catch the smoothing up when rendering makes the frame loop slower.
+        smoothing_steps = max(1, min(12, int(round(elapsed_ms / nominal_ms)) if elapsed_ms else 1))
+        step_seconds = (elapsed_ms / 1000.0) / smoothing_steps if elapsed_ms else 1.0 / FPS
 
         for i in range(self.active_bars):
             target = data[i] * max_h
-            for _ in range(spring_steps):
+            for _ in range(smoothing_steps):
                 diff = target - self.heights[i]
-                ratio = min(1.0, abs(diff) / max_h) if max_h > 0 else 0.0
-                ease = ease_in_out(ratio)
-                spring_force = SPRING * (0.70 + 0.50 * ease)
-                self.velocity[i] = (self.velocity[i] + diff * spring_force) * DAMPING
-                if abs(self.velocity[i]) > abs(diff):
-                    self.velocity[i] = math.copysign(abs(diff), self.velocity[i])
-                self.heights[i] = max(0.0, self.heights[i] + self.velocity[i])
+                time_constant = VISUAL_ATTACK_SECONDS if diff > 0 else VISUAL_RELEASE_SECONDS
+                follow = 1.0 - math.exp(-step_seconds / time_constant)
+                self.heights[i] = max(0.0, self.heights[i] + diff * follow)
 
     def control_panel_rect(self):
         w, h = self.screen.get_size()
@@ -773,26 +779,6 @@ class AudioVisualizer:
 
     def draw_background(self, w, h):
         self.screen.fill(COLOR_BG)
-        atmosphere = pygame.Surface((w, h), pygame.SRCALPHA)
-        bloom = max(120, min(w, h) // 5)
-        pygame.draw.circle(
-            atmosphere,
-            (255, 96, 160, 28),
-            (int(w * 0.18), int(h * 0.18)),
-            bloom,
-        )
-        pygame.draw.circle(
-            atmosphere,
-            (255, 140, 186, 18),
-            (int(w * 0.82), int(h * 0.28)),
-            max(90, bloom // 2),
-        )
-        pygame.draw.ellipse(
-            atmosphere,
-            (255, 86, 150, 14),
-            pygame.Rect(int(w * 0.14), int(h * 0.58), int(w * 0.72), int(h * 0.28)),
-        )
-        self.screen.blit(atmosphere, (0, 0))
 
     def draw_top_actions(self):
         for button in self.action_buttons:
@@ -927,7 +913,7 @@ class AudioVisualizer:
 
         knob_x = prog_x + fill
         knob_x = max(prog_x, min(prog_x + prog_w, knob_x))
-        pygame.draw.circle(self.screen, COLOR_TERMINAL_BORDER, (knob_x, prog_y + prog_h // 2), 4)
+        pygame.draw.rect(self.screen, COLOR_TERMINAL_BORDER, (knob_x - 4, prog_y - 3, 8, 8))
 
     def draw_track_label(self, w):
         available_right = self.top_actions_left - 20 if self.top_actions_left else w - 20
@@ -981,8 +967,8 @@ class AudioVisualizer:
         for idx in range(self.playlist_scroll, min(len(self.playlist), self.playlist_scroll + visible_lines)):
             row = pygame.Rect(18, 96 + (idx - self.playlist_scroll) * 36, overlay_rect.w - 36, 30)
             if idx == self.playlist_cursor:
-                pygame.draw.rect(overlay, (28, 10, 20, 210), row, border_radius=10)
-                pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, row, 1, border_radius=10)
+                pygame.draw.rect(overlay, (34, 34, 34, 230), row)
+                pygame.draw.rect(overlay, COLOR_TERMINAL_BORDER, row, 1)
             name = trim_text(self.font, os.path.basename(self.playlist[idx]), row.w - 24)
             prefix = "▶ " if idx == self.playlist_index else "   "
             color = COLOR_TERMINAL_BORDER if idx == self.playlist_cursor else COLOR_TERMINAL_TEXT
@@ -1127,8 +1113,6 @@ class AudioVisualizer:
             else:
                 base_y = self.progress_hit_rect().y - 20
 
-            glow_surface = pygame.Surface((w, h), pygame.SRCALPHA)
-
             for i in range(self.active_bars):
                 bh = self.heights[i]
                 if bh < 1:
@@ -1136,9 +1120,7 @@ class AudioVisualizer:
                 color = bar_color(i, self.active_bars)
                 x = bar_area_x + i * bar_w + bar_w * 0.5
                 top_y = base_y - bh
-                draw_neon_bar(self.screen, glow_surface, x, base_y, top_y, color, stem_width)
-
-            self.screen.blit(glow_surface, (0, 0))
+                draw_neon_bar(self.screen, x, base_y, top_y, color, stem_width)
 
             if not self.rendering:
                 self.draw_top_actions()
