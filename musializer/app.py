@@ -27,6 +27,8 @@ from .constants import (
     FPS,
     MAX_BARS,
     SKIP_SECONDS,
+    SPECTRUM_CEIL_PERCENTILE,
+    SPECTRUM_FLOOR_PERCENTILE,
     STATUS_TIMEOUT_SECONDS,
     STREAM_CACHE_DIR,
     STREAM_QUERY_PREFIX,
@@ -34,14 +36,16 @@ from .constants import (
     VISUAL_ATTACK_SECONDS,
     VISUAL_GAIN,
     VISUAL_LOOKAHEAD_SECONDS,
+    VISUAL_MAX_HEIGHT_RATIO,
+    VISUAL_PEAK_DECAY_PER_SECOND,
     VISUAL_RELEASE_SECONDS,
     VISUAL_RESPONSE_POWER,
+    VISUAL_TOP_MARGIN,
 )
 from .rendering import VideoRenderer
 from .visuals import (
-    bar_color,
     clean_filename,
-    draw_neon_bar,
+    draw_stacked_bar,
     draw_terminal_panel_box,
     humanize_source,
     load_mono_font,
@@ -77,6 +81,8 @@ class AudioVisualizer:
 
         self.file = None
         self.spec = None
+        self.spec_floor = None
+        self.spec_range = None
         self.times = None
         self.duration = 0
         self.track_title = ""
@@ -87,6 +93,8 @@ class AudioVisualizer:
 
         self.active_bars = 84
         self.heights = np.zeros(MAX_BARS)
+        self.peak_heights = np.zeros(MAX_BARS)
+        self.visual_max_height = 1.0
 
         self.start_ticks = 0
         self.pause_time = 0.0
@@ -106,6 +114,7 @@ class AudioVisualizer:
         self.status_message = ""
         self.status_level = "info"
         self.status_until = 0.0
+        self.dragging_local_file = False
 
         self.show_stream_prompt = False
         self.stream_input = ""
@@ -231,6 +240,21 @@ class AudioVisualizer:
 
         if path:
             self.load_playlist(os.path.dirname(path), start_file=path)
+
+    def load_drop_target(self, path):
+        if self.rendering or self.loading:
+            return False
+
+        self.dragging_local_file = False
+        if os.path.isdir(path):
+            self.load_playlist(path)
+            return True
+        if os.path.isfile(path):
+            self.load_playlist(os.path.dirname(path), start_file=path)
+            return True
+
+        self.set_status("Drop a supported audio/video file or a folder.", "warning")
+        return False
 
     def seek(self, t):
         if self.spec is None or self.loading:
@@ -433,6 +457,10 @@ class AudioVisualizer:
 
         payload = pending["payload"]
         self.spec = payload["spec"]
+        spec_floor = np.percentile(self.spec, SPECTRUM_FLOOR_PERCENTILE, axis=1)
+        spec_ceil = np.percentile(self.spec, SPECTRUM_CEIL_PERCENTILE, axis=1)
+        self.spec_floor = spec_floor
+        self.spec_range = np.maximum(6.0, spec_ceil - spec_floor)
         self.times = payload["times"]
         self.duration = payload["duration"]
         self.file = payload["path"]
@@ -443,6 +471,7 @@ class AudioVisualizer:
         self.render_base_path = payload["render_base_path"]
 
         self.heights.fill(0)
+        self.peak_heights.fill(0)
 
         pygame.mixer.music.load(self.file)
         pygame.mixer.music.play()
@@ -530,7 +559,12 @@ class AudioVisualizer:
             mix = 0.0 if hi_t <= lo_t else (t - lo_t) / (hi_t - lo_t)
             mix = max(0.0, min(1.0, mix))
             frame = self.spec[:, lo_idx] * (1.0 - mix) + self.spec[:, hi_idx] * mix
-        frame = np.clip(((frame + 80) / 80) ** VISUAL_RESPONSE_POWER * VISUAL_GAIN, 0, 1)
+        if self.spec_floor is not None and self.spec_range is not None:
+            frame = (frame - self.spec_floor) / self.spec_range
+        else:
+            frame = (frame + 80) / 80
+        frame = np.clip(frame, 0, 1)
+        frame = 1.0 - np.exp(-((frame**VISUAL_RESPONSE_POWER) * VISUAL_GAIN))
         return frame[:self.active_bars]
 
     def update(self):
@@ -594,7 +628,11 @@ class AudioVisualizer:
 
         visual_time = min(self.duration, self.current_time + VISUAL_LOOKAHEAD_SECONDS)
         data = self.spectrum_at(visual_time)
-        max_h = self.screen.get_height() * 0.60
+        screen_h = self.screen.get_height()
+        base_y = screen_h - 40 if self.rendering else self.progress_hit_rect().y - 20
+        available_h = max(80, base_y - VISUAL_TOP_MARGIN)
+        max_h = min(screen_h * VISUAL_MAX_HEIGHT_RATIO, available_h)
+        self.visual_max_height = max_h
         now_ticks = pygame.time.get_ticks()
         elapsed_ms = max(0, now_ticks - self.last_visual_ticks)
         self.last_visual_ticks = now_ticks
@@ -610,6 +648,8 @@ class AudioVisualizer:
                 time_constant = VISUAL_ATTACK_SECONDS if diff > 0 else VISUAL_RELEASE_SECONDS
                 follow = 1.0 - math.exp(-step_seconds / time_constant)
                 self.heights[i] = max(0.0, self.heights[i] + diff * follow)
+            decay = max_h * VISUAL_PEAK_DECAY_PER_SECOND * step_seconds * smoothing_steps
+            self.peak_heights[i] = max(self.heights[i], self.peak_heights[i] - decay)
 
     def control_panel_rect(self):
         w, h = self.screen.get_size()
@@ -1035,6 +1075,35 @@ class AudioVisualizer:
         self.screen.blit(line1, (text_x, panel.y + 36))
         self.screen.blit(line2, (text_x, panel.y + 60))
 
+    def draw_drop_overlay(self):
+        if not self.dragging_local_file:
+            return
+
+        w, h = self.screen.get_size()
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((0, 0, 0, 180))
+        self.screen.blit(veil, (0, 0))
+
+        margin = 44 if w >= 760 else 20
+        rect = pygame.Rect(margin, margin, max(80, w - margin * 2), max(80, h - margin * 2))
+        draw_terminal_panel_box(
+            self.screen,
+            rect,
+            border_color=COLOR_ACCENT_SOFT,
+            fill_color=(8, 8, 8, 210),
+            radius=0,
+            glow_alpha=0,
+        )
+
+        title = self.font_big.render("DROP LOCAL FILE", True, COLOR_TERMINAL_TEXT)
+        detail = self.font.render(
+            trim_text(self.font, "Drop an audio/video file or a folder to load it as a playlist.", rect.w - 64),
+            True,
+            COLOR_TEXT_DIM,
+        )
+        self.screen.blit(title, (rect.centerx - title.get_width() // 2, rect.centery - 30))
+        self.screen.blit(detail, (rect.centerx - detail.get_width() // 2, rect.centery + 10))
+
     def draw_stream_prompt_overlay(self):
         rect = self.stream_prompt_rect()
         draw_terminal_panel_box(
@@ -1117,10 +1186,16 @@ class AudioVisualizer:
                 bh = self.heights[i]
                 if bh < 1:
                     continue
-                color = bar_color(i, self.active_bars)
                 x = bar_area_x + i * bar_w + bar_w * 0.5
-                top_y = base_y - bh
-                draw_neon_bar(self.screen, x, base_y, top_y, color, stem_width)
+                draw_stacked_bar(
+                    self.screen,
+                    x,
+                    base_y,
+                    bh,
+                    self.peak_heights[i],
+                    self.visual_max_height,
+                    stem_width,
+                )
 
             if not self.rendering:
                 self.draw_top_actions()
@@ -1136,6 +1211,8 @@ class AudioVisualizer:
 
         if self.show_stream_prompt:
             self.draw_stream_prompt_overlay()
+
+        self.draw_drop_overlay()
 
         if self.loading:
             self.draw_loading_overlay()
@@ -1157,13 +1234,18 @@ class AudioVisualizer:
                 if self.handle_stream_prompt_event(event):
                     continue
 
-                if event.type == pygame.DROPFILE and not self.rendering and not self.loading:
-                    if os.path.isdir(event.file):
-                        self.load_playlist(event.file)
-                    elif os.path.isfile(event.file):
-                        self.load_playlist(os.path.dirname(event.file), start_file=event.file)
-                    else:
-                        self.set_status("That drop target is not a supported file or folder.", "warning")
+                if event.type == pygame.DROPBEGIN and not self.rendering and not self.loading:
+                    self.dragging_local_file = True
+                    self.show_stream_prompt = False
+                    self.show_playlist = False
+                    continue
+
+                if event.type == pygame.DROPCOMPLETE:
+                    self.dragging_local_file = False
+                    continue
+
+                if event.type == pygame.DROPFILE:
+                    self.load_drop_target(event.file)
                     continue
 
                 if event.type == pygame.KEYDOWN:

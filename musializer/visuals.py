@@ -2,37 +2,48 @@ import re
 
 import pygame
 
-from .constants import BAR_GRAD, COLOR_TERMINAL_BORDER
-
-
-def bar_color(i, n, hue_shift=0.0, time_phase=0.0):
-    del hue_shift, time_phase
-    if len(BAR_GRAD) == 1:
-        return BAR_GRAD[0]
-
-    t = i / max(n - 1, 1)
-    scaled = t * (len(BAR_GRAD) - 1)
-    lo_idx = int(scaled)
-    hi_idx = min(lo_idx + 1, len(BAR_GRAD) - 1)
-    mix = scaled - lo_idx
-    lo = BAR_GRAD[lo_idx]
-    hi = BAR_GRAD[hi_idx]
-    return tuple(int(lo[channel] + (hi[channel] - lo[channel]) * mix) for channel in range(3))
+from .constants import (
+    BAR_BASE_COLOR,
+    BAR_MID_COLOR,
+    BAR_PEAK_COLOR,
+    BAR_TICK_COLOR,
+    COLOR_TERMINAL_BORDER,
+    VISUAL_BASE_RATIO,
+    VISUAL_PEAK_RATIO,
+)
 
 
 def with_alpha(color, alpha):
     return (color[0], color[1], color[2], alpha)
 
 
-def draw_neon_bar(surface, x, base_y, top_y, color, stem_width):
+def draw_stacked_bar(surface, x, base_y, height, peak_height, max_height, stem_width):
     x = int(x)
     base_y = int(base_y)
-    top_y = int(top_y)
     bar_width = max(2, int(stem_width))
-    bar_height = max(4, base_y - top_y)
+    bar_height = max(1, int(height))
+    max_height = max(1, int(max_height))
     left = x - bar_width // 2
-    rect = pygame.Rect(left, base_y - bar_height, bar_width, bar_height)
-    pygame.draw.rect(surface, color, rect)
+
+    base_h = min(bar_height, max(2, int(max_height * VISUAL_BASE_RATIO)))
+    mid_h = max(0, bar_height - base_h)
+    peak_h = min(mid_h, max(2, int(max_height * VISUAL_PEAK_RATIO))) if mid_h > 0 else 0
+    body_h = max(0, mid_h - peak_h)
+
+    pygame.draw.rect(surface, BAR_BASE_COLOR, pygame.Rect(left, base_y - base_h, bar_width, base_h))
+
+    y = base_y - base_h
+    if body_h > 0:
+        pygame.draw.rect(surface, BAR_MID_COLOR, pygame.Rect(left, y - body_h, bar_width, body_h))
+        y -= body_h
+    if peak_h > 0:
+        pygame.draw.rect(surface, BAR_PEAK_COLOR, pygame.Rect(left, y - peak_h, bar_width, peak_h))
+
+    tick_y = base_y - int(max(peak_height, bar_height)) - 14
+    if tick_y > 2:
+        tick_w = max(3, min(bar_width, int(bar_width * 0.75)))
+        tick_x = x - tick_w // 2
+        pygame.draw.rect(surface, BAR_TICK_COLOR, pygame.Rect(tick_x, tick_y, tick_w, 2))
 
 
 def ease_in_out(t):
